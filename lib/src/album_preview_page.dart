@@ -38,18 +38,9 @@ class _AlbumPreviewPageState extends State<AlbumPreviewPage> {
     _precacheNeighbors(_index);
   }
 
-  /// Decodes at roughly twice the screen's pixel width instead of the shot's
-  /// full resolution. Twice the screen keeps a pinch-zoom reasonably sharp;
-  /// `fit` never upscales anything already smaller.
-  ImageProvider _providerFor(File file) {
-    final size = MediaQuery.sizeOf(context);
-    final ratio = MediaQuery.devicePixelRatioOf(context);
-    return ResizeImage(
-      FileImage(file),
-      width: (size.width * ratio * 2).round(),
-      policy: ResizeImagePolicy.fit,
-    );
-  }
+  /// The file itself, at its own pixel size. Nothing is resampled before it
+  /// is drawn, so the preview is the original photo fitted to the screen.
+  ImageProvider _providerFor(File file) => FileImage(file);
 
   /// Starts decoding the shots on either side, so by the time a swipe lands
   /// the neighbor is already sitting decoded in the image cache.
@@ -100,12 +91,24 @@ class _AlbumPreviewPageState extends State<AlbumPreviewPage> {
           final file = widget.photos[index].file;
           return InteractiveViewer(
             minScale: 1,
-            maxScale: 4,
+            maxScale: 8,
             child: Center(
               child: Image(
                 image: _providerFor(file),
                 fit: BoxFit.contain,
+                filterQuality: FilterQuality.medium,
                 gaplessPlayback: true,
+                // The full photo can take a moment. Until it arrives, show
+                // the same small decode the grid already has.
+                frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+                  if (wasSynchronouslyLoaded || frame != null) return child;
+                  return Image.file(
+                    file,
+                    fit: BoxFit.contain,
+                    cacheWidth: 240,
+                    gaplessPlayback: true,
+                  );
+                },
                 errorBuilder: (_, _, _) => const Icon(
                   Icons.broken_image_outlined,
                   color: Colors.white54,

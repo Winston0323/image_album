@@ -15,7 +15,11 @@ void main() {
 }
 ```
 
-The shot date is the file's modification time. Subfolders are not walked. Recognized extensions are jpg, jpeg, png, gif, webp, bmp, heic, and heif.
+The shot date is the capture time stored in the photo, or the file's modification time when it has none. Subfolders are skipped unless `recursive` is true. Recognized extensions are jpg, jpeg, png, gif, webp, bmp, heic, and heif.
+
+```dart
+ImageAlbum(path: '/path/to/images', recursive: true)
+```
 
 ```yaml
 dependencies:
@@ -25,3 +29,12 @@ dependencies:
 ```
 
 `ImageAlbum.reload` on `ImageAlbumState` re-reads the folder after files change.
+
+## Demo
+
+`example` lets you pick a folder, then opens it in the album. Windows uses the system folder dialog. On Android, grant all-files access when asked so the app can list that folder.
+
+```bash
+cd example
+flutter run
+```

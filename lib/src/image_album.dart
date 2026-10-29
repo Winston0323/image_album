@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'album_photo.dart';
@@ -12,10 +14,9 @@ typedef ConfirmAlbumDelete = Future<bool> Function(
 
 /// Full-screen album of the images in [path].
 ///
-/// Lists image files directly in that directory and lays them out as a
-/// three-column grid grouped by day, newest first — the same waterfall the
-/// transfer album uses. Tap a tile to open the swipe preview; long-press to
-/// select, then delete.
+/// Lists image files in that directory and lays them out as a three-column
+/// grid grouped by day, newest first. Tap a tile to open the swipe preview;
+/// long-press to select, then delete. Set [recursive] to include subfolders.
 ///
 /// Own scroll controller, with `primary: false`, so the album can sit in an
 /// [IndexedStack] beside other scrollables without sharing the ambient
@@ -29,11 +30,15 @@ class ImageAlbum extends StatefulWidget {
     this.empty,
     this.countLabel,
     this.confirmDelete,
+    this.recursive = false,
   });
 
-  /// Directory whose image files are shown. Only files directly inside it
-  /// are listed; see [loadAlbumPhotos].
+  /// Directory whose image files are shown. See [loadAlbumPhotos].
   final String path;
+
+  /// When true, images in subfolders of [path] are included. Links are not
+  /// followed. Defaults to false, which lists only files directly in [path].
+  final bool recursive;
 
   /// App-bar title while nothing is selected.
   final Widget title;
@@ -65,6 +70,9 @@ class ImageAlbumState extends State<ImageAlbum> {
   bool _loading = true;
   String? _error;
   int _loadGeneration = 0;
+  AlbumLoadToken? _scan;
+  Timer? _progressTimer;
+  List<AlbumPhoto>? _pendingFound;
 
   /// Photos picked for deletion, by [AlbumPhoto.id]. Non-empty is what puts
   /// the screen in selection mode.
@@ -79,7 +87,8 @@ class ImageAlbumState extends State<ImageAlbum> {
   @override
   void didUpdateWidget(ImageAlbum oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.path != widget.path) {
+    if (oldWidget.path != widget.path ||
+        oldWidget.recursive != widget.recursive) {
       _selected.clear();
       _loading = true;
       _error = null;
@@ -90,6 +99,8 @@ class ImageAlbumState extends State<ImageAlbum> {
 
   @override
   void dispose() {
+    _progressTimer?.cancel();
+    _scan?.cancel();
     _gridController.dispose();
     _fillerController.dispose();
     super.dispose();
@@ -100,6 +111,12 @@ class ImageAlbumState extends State<ImageAlbum> {
   Future<void> reload() => _load();
 
   Future<void> _load({bool showSpinner = true}) async {
+    _progressTimer?.cancel();
+    _progressTimer = null;
+    _pendingFound = null;
+    _scan?.cancel();
+    final scan = AlbumLoadToken();
+    _scan = scan;
     final generation = ++_loadGeneration;
     if (showSpinner) {
       if (!mounted) return;
@@ -109,23 +126,61 @@ class ImageAlbumState extends State<ImageAlbum> {
       });
     }
     try {
-      final photos = await loadAlbumPhotos(widget.path);
-      if (!mounted || generation != _loadGeneration) return;
-      setState(() {
-        _sections = groupAlbumByDay(photos);
-        _selected.removeWhere(
-          (id) => !photos.any((photo) => photo.id == id),
-        );
-        _loading = false;
-        _error = null;
-      });
+      final photos = await loadAlbumPhotos(
+        widget.path,
+        recursive: widget.recursive,
+        token: scan,
+        onProgress: (found) => _publishFound(generation, found),
+      );
+      _publishFound(generation, photos, done: true);
     } catch (e) {
       if (!mounted || generation != _loadGeneration) return;
+      _progressTimer?.cancel();
+      _progressTimer = null;
       setState(() {
         _error = '$e';
         _loading = false;
       });
     }
+  }
+
+  /// Applies a scan batch. The first tiles show up immediately; later batches
+  /// are coalesced so rebuilding the grid does not hitch every few files.
+  void _publishFound(
+    int generation,
+    List<AlbumPhoto> found, {
+    bool done = false,
+  }) {
+    if (!mounted || generation != _loadGeneration) return;
+    if (done) {
+      _progressTimer?.cancel();
+      _progressTimer = null;
+      _pendingFound = null;
+      _applyFound(found, loading: false);
+      return;
+    }
+    _pendingFound = found;
+    if (_sections.isEmpty) {
+      _applyFound(found, loading: true);
+      return;
+    }
+    _progressTimer ??= Timer(const Duration(milliseconds: 100), () {
+      _progressTimer = null;
+      final pending = _pendingFound;
+      if (pending == null || !mounted || generation != _loadGeneration) return;
+      _applyFound(pending, loading: true);
+    });
+  }
+
+  void _applyFound(List<AlbumPhoto> found, {required bool loading}) {
+    setState(() {
+      _sections = groupAlbumByDay(found);
+      _selected.removeWhere(
+        (id) => !found.any((photo) => photo.id == id),
+      );
+      _loading = loading;
+      _error = null;
+    });
   }
 
   void _openPreview(List<AlbumPhoto> flatPhotos, AlbumPhoto photo) {
@@ -210,11 +265,12 @@ class ImageAlbumState extends State<ImageAlbum> {
       body: RefreshIndicator(
         onRefresh: () => _load(),
         child: switch ((_loading, _error, _sections.isEmpty)) {
-          (true, _, _) => _centered(const CircularProgressIndicator()),
-          (false, final error?, _) => _centered(
+          (_, final error?, _) => _centered(
               _ErrorBody(message: error, onRetry: () => _load()),
             ),
-          (false, null, true) => _centered(widget.empty ?? const _DefaultEmpty()),
+          (true, null, true) => _centered(const CircularProgressIndicator()),
+          (false, null, true) =>
+            _centered(widget.empty ?? const _DefaultEmpty()),
           _ => CustomScrollView(
               controller: _gridController,
               primary: false,
@@ -223,11 +279,24 @@ class ImageAlbumState extends State<ImageAlbum> {
                 SliverPadding(
                   padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
                   sliver: SliverToBoxAdapter(
-                    child: Text(
-                      _countText,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: Theme.of(context).hintColor,
+                    child: Row(
+                      children: [
+                        Text(
+                          _countText,
+                          style:
+                              Theme.of(context).textTheme.bodySmall?.copyWith(
+                                    color: Theme.of(context).hintColor,
+                                  ),
+                        ),
+                        if (_loading) ...[
+                          const SizedBox(width: 8),
+                          const SizedBox(
+                            width: 12,
+                            height: 12,
+                            child: CircularProgressIndicator(strokeWidth: 2),
                           ),
+                        ],
+                      ],
                     ),
                   ),
                 ),
@@ -373,11 +442,13 @@ class _PhotoTile extends StatelessWidget {
             child: Image.file(
               photo.file,
               fit: BoxFit.cover,
+              gaplessPlayback: true,
               // Decoded at roughly tile resolution rather than full size, so a
               // grid of full-resolution photos does not each cost a full decode
               // just to show a thumbnail.
               cacheWidth: 240,
-              errorBuilder: (_, _, _) => const Icon(Icons.broken_image_outlined),
+              errorBuilder: (_, _, _) =>
+                  const Icon(Icons.broken_image_outlined),
             ),
           ),
           if (selected)

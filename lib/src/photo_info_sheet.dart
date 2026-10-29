@@ -64,28 +64,11 @@ Future<PhotoInfo> loadPhotoInfo(AlbumPhoto photo) async {
     byteSize: bytes.length,
     width: width,
     height: height,
-    // The file's modification time is the fallback when the EXIF block
-    // carries no capture date.
-    shotDate: _exifDate(tags['EXIF DateTimeOriginal']) ?? photo.takenAt,
+    // Same date the grid is sorted by: the capture time when the file has
+    // one, otherwise the modification time [AlbumPhoto.takenAt] already holds.
+    shotDate: photo.takenAt,
     focalLength: _exifFocalLength(tags['EXIF FocalLength']),
     lensModel: tags['EXIF LensModel']?.printable.trim(),
-  );
-}
-
-DateTime? _exifDate(IfdTag? tag) {
-  final raw = tag?.printable.trim();
-  if (raw == null) return null;
-  // EXIF writes 'YYYY:MM:DD HH:MM:SS' — colons in the date part too.
-  final match = RegExp(r'^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})')
-      .firstMatch(raw);
-  if (match == null) return null;
-  return DateTime(
-    int.parse(match[1]!),
-    int.parse(match[2]!),
-    int.parse(match[3]!),
-    int.parse(match[4]!),
-    int.parse(match[5]!),
-    int.parse(match[6]!),
   );
 }
 
