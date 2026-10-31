@@ -8,6 +8,18 @@ AlbumPhoto _photo(String name, DateTime takenAt) =>
     AlbumPhoto(file: File(name), takenAt: takenAt);
 
 void main() {
+  group('albumFileType', () {
+    test('gives one label to each kind, whatever the spelling', () {
+      expect(albumFileType('/a/DSC0001.JPG'), 'JPG');
+      expect(albumFileType('/a/b.jpeg'), 'JPG');
+      expect(albumFileType('/a/b.Png'), 'PNG');
+      expect(albumFileType('/a/b.heif'), 'HEIC');
+      expect(albumFileType('/a/b.HEIC'), 'HEIC');
+      expect(albumFileType('/a/b.webp'), 'WEBP');
+      expect(albumFileType('/a/no_extension'), '');
+    });
+  });
+
   group('groupAlbumByDay', () {
     test('orders days newest first, and shots newest first within a day', () {
       final sections = groupAlbumByDay([

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image_album/image_album.dart';
+import 'package:image_album/src/photo_info_panel.dart';
 
 /// A 1x1 transparent PNG. Real bytes (rather than junk) so `Image.file`
 /// decodes successfully instead of exercising the error-builder path.
@@ -157,14 +158,93 @@ void main() {
 
     await tester.tap(find.byTooltip('Photo info'));
     await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 400));
     await _settle(tester);
+    await tester.pump(const Duration(milliseconds: 400));
 
+    expect(find.text('Info'), findsOneWidget);
     expect(find.text('Size'), findsOneWidget);
     expect(find.text('1 × 1 (0.0 MP)'), findsOneWidget);
     expect(find.text('2026-07-30 12:00:00'), findsOneWidget);
     expect(find.text('Path'), findsOneWidget);
     expect(find.textContaining('A.JPG'), findsWidgets);
     expect(find.text('Focal length'), findsNothing);
+
+    await tester.tap(find.byTooltip('Close info'));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Info'), findsNothing);
+  });
+
+  group('info sidebar', () {
+    Future<void> openInfo(WidgetTester tester, double width) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = Size(width, 800);
+      addTearDown(tester.view.reset);
+
+      await writePhoto(tester, 'A.JPG', modifiedAt: DateTime(2026, 7, 30, 12));
+      await writePhoto(tester, 'B.JPG', modifiedAt: DateTime(2026, 7, 29, 12));
+      await tester.pumpWidget(app());
+      await _settle(tester);
+      await tester.tap(find.byType(Image).first);
+      await _settle(tester);
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(find.byTooltip('Photo info'));
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump(const Duration(milliseconds: 400));
+      await _settle(tester);
+      await tester.pump(const Duration(milliseconds: 400));
+    }
+
+    testWidgets('sits beside the photo on a wide window', (tester) async {
+      await openInfo(tester, 1400);
+
+      final panel = tester.getRect(find.byType(PhotoInfoPanel));
+      expect(panel.right, 1400);
+      expect(panel.width, 340);
+      expect(panel.height, 800);
+      // The photo pager gives up that room instead of running under it.
+      expect(tester.getRect(find.byType(PageView)).right, panel.left);
+    });
+
+    testWidgets('opens and closes with a slide, not a jump', (tester) async {
+      await openInfo(tester, 1400);
+      expect(tester.getRect(find.byType(PhotoInfoPanel)).width, 340);
+
+      await tester.tap(find.byTooltip('Close info'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 80));
+
+      // The photo is taking the room back as it goes: its edge is somewhere
+      // between where it was and the window edge.
+      final edge = tester.getRect(find.byType(PageView)).right;
+      expect(edge, inExclusiveRange(1400 - 340, 1400));
+    });
+
+    testWidgets('slides over the photo on a narrow window', (tester) async {
+      await openInfo(tester, 600);
+
+      final panel = tester.getRect(find.byType(PhotoInfoPanel));
+      expect(panel.right, 600);
+      expect(panel.width, lessThanOrEqualTo(340));
+      expect(tester.getRect(find.byType(PageView)).right, 600);
+    });
+
+    testWidgets('follows the photo being viewed', (tester) async {
+      await openInfo(tester, 1400);
+      expect(find.text('2026-07-30 12:00:00'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('Next photo'));
+      await tester.pump(const Duration(milliseconds: 400));
+      await _settle(tester);
+      // The swipe animation, then the short wait before the new file is read.
+      await tester.pump(const Duration(milliseconds: 300));
+      await _settle(tester);
+      await tester.pump(const Duration(milliseconds: 300));
+      await _settle(tester);
+      expect(find.text('2026-07-29 12:00:00'), findsOneWidget);
+      expect(find.text('2026-07-30 12:00:00'), findsNothing);
+    });
   });
 
   testWidgets('long-press selects, and delete removes the file', (

@@ -224,6 +224,8 @@ class _AlbumHomeState extends State<_AlbumHome> {
       library: library,
       initialExcludedFolders: library.excluded,
       onExcludedFoldersChanged: (excluded) => library.setExcluded(excluded),
+      initialFileTypes: library.fileTypes,
+      onFileTypesChanged: (types) => library.setFileTypes(types),
       onAddSource: _addSource,
       onRemoveSource: _removeSource,
       actions: [

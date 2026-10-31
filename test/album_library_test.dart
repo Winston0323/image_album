@@ -82,6 +82,21 @@ void main() {
       },
     );
 
+    test('keeps the file type filter, tidied, between openings', () async {
+      final library = await AlbumLibrary.open(libraryDir());
+      expect(library.fileTypes, isEmpty);
+
+      await library.setFileTypes([' png ', 'JPG', '']);
+      expect(library.fileTypes, {'PNG', 'JPG'});
+
+      final reopened = await AlbumLibrary.open(libraryDir());
+      expect(reopened.fileTypes, {'PNG', 'JPG'});
+      expect((await manifest(reopened))['fileTypes'], ['JPG', 'PNG']);
+
+      await reopened.setFileTypes(const []);
+      expect((await AlbumLibrary.open(libraryDir())).fileTypes, isEmpty);
+    });
+
     test('removing a source keeps the others in order', () async {
       final library = await AlbumLibrary.open(libraryDir());
       for (final name in ['a', 'b', 'c']) {

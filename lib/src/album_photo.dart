@@ -33,6 +33,22 @@ class AlbumPhoto {
   String get id => file.path;
 
   String get fileName => p.basename(file.path);
+
+  /// What kind of file this is. See [albumFileType].
+  String get fileType => albumFileType(file.path);
+}
+
+/// The kind of image [path] is, as a short upper-case label such as `JPG`,
+/// `PNG` or `HEIC`. Variant spellings share a label (`.jpeg` is `JPG`, `.heif`
+/// is `HEIC`), so a filter on one catches them all.
+String albumFileType(String path) {
+  final extension = p.extension(path).toLowerCase();
+  return switch (extension) {
+    '.jpg' || '.jpeg' => 'JPG',
+    '.heic' || '.heif' => 'HEIC',
+    '' => '',
+    _ => extension.substring(1).toUpperCase(),
+  };
 }
 
 /// One day's worth of photos, newest day first when produced by [groupAlbumByDay].

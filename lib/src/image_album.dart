@@ -1,8 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
+import 'album_drag_select.dart';
 import 'album_folders.dart';
 import 'album_library.dart';
 import 'album_photo.dart';
@@ -24,8 +26,20 @@ const double albumTileMaxExtent = 140;
 /// Pass one folder as [path], or several as [paths]; their photos are merged
 /// into a single grid grouped by day, newest first. Tiles are about
 /// [albumTileMaxExtent] wide at most, so a phone gets three columns and a wider
-/// window gets proportionally more. Tap a tile to open the swipe preview;
-/// long-press to select, then delete. Set [recursive] to include subfolders.
+/// window gets proportionally more. Tap a tile to open the swipe preview.
+/// Set [recursive] to include subfolders.
+///
+/// To select photos, then delete them:
+///
+/// * Click a tile's check mark, or long-press a tile.
+/// * Ctrl-click (cmd-click) picks or unpicks one photo; shift-click picks
+///   the range from the last pick, and ctrl+shift-click adds that range to
+///   what is already picked.
+/// * Press the mouse on a tile and drag to pick every tile the pointer goes
+///   over, or on a picked tile to unpick them. On a touch screen, long-press
+///   and keep the finger down. The grid scrolls when the pointer reaches its
+///   top or bottom edge.
+/// * Ctrl+A (cmd+A) picks everything and Escape lets go.
 ///
 /// The album does not choose folders itself. Give it [onAddSource] and
 /// [onRemoveSource] and the folder panel offers to add and remove sources;
@@ -48,6 +62,8 @@ class ImageAlbum extends StatefulWidget {
     this.recursive = false,
     this.initialExcludedFolders = const {},
     this.onExcludedFoldersChanged,
+    this.initialFileTypes = const {},
+    this.onFileTypesChanged,
     this.onAddSource,
     this.onRemoveSource,
     this.library,
@@ -103,6 +119,16 @@ class ImageAlbum extends StatefulWidget {
   /// next time.
   final ValueChanged<Set<String>>? onExcludedFoldersChanged;
 
+  /// The file types shown when the album opens, as [albumFileType] labels
+  /// such as `JPG` and `PNG`. Empty shows every type. Read when the album is
+  /// created; after that the user's choice in the filter bar takes over.
+  final Set<String> initialFileTypes;
+
+  /// Called with the chosen file types each time the user changes them, so
+  /// the choice can be saved and passed back as [initialFileTypes] next time.
+  /// An empty set means every type.
+  final ValueChanged<Set<String>>? onFileTypesChanged;
+
   /// App-bar title while nothing is selected.
   final Widget title;
 
@@ -137,6 +163,17 @@ class ImageAlbumState extends State<ImageAlbum> {
 
   /// Everything found in all sources, before hidden folders are taken out.
   List<AlbumPhoto> _allPhotos = const [];
+
+  /// File types picked in the filter bar, as [albumFileType] labels. Empty
+  /// shows them all.
+  Set<String> _types = {};
+
+  /// How many photos of each type the shown folders hold, whatever the filter.
+  /// Feeds the filter bar.
+  Map<String, int> _typeCounts = const {};
+
+  /// Photos in the shown folders, before the type filter.
+  int _inShownFolders = 0;
 
   /// What each source's scan has found so far, hidden folders not yet taken
   /// out, newest first. Kept per source so that hiding a folder is instant, a
@@ -176,11 +213,19 @@ class ImageAlbumState extends State<ImageAlbum> {
   /// the screen in selection mode.
   final Set<String> _selected = {};
 
+  /// The photo a shift-click selects a range from: the last one picked.
+  String? _anchor;
+
+  final GlobalKey<AlbumDragSelectState> _dragKey = GlobalKey();
+
   @override
   void initState() {
     super.initState();
     _sources = _normalizedSources();
     _excluded = _normalized(widget.initialExcludedFolders);
+    _types = {
+      for (final type in widget.initialFileTypes) type.trim().toUpperCase(),
+    }..remove('');
     _startScans(_sources);
   }
 
@@ -367,12 +412,41 @@ class ImageAlbumState extends State<ImageAlbum> {
       for (final source in _sources)
         filterAlbumByExcluded(_found[source] ?? const [], source, _excluded),
     ]);
-    _flatPhotos = visible;
-    _sections = groupAlbumByDay(visible);
+    _inShownFolders = visible.length;
+
+    final counts = <String, int>{};
+    for (final photo in visible) {
+      counts.update(photo.fileType, (n) => n + 1, ifAbsent: () => 1);
+    }
+    _typeCounts = counts;
+
+    final shown = _types.isEmpty
+        ? visible
+        : [
+            for (final photo in visible)
+              if (_types.contains(photo.fileType)) photo,
+          ];
+    _flatPhotos = shown;
+    _sections = groupAlbumByDay(shown);
     if (_selected.isNotEmpty) {
-      final ids = {for (final photo in visible) photo.id};
+      final ids = {for (final photo in shown) photo.id};
       _selected.removeWhere((id) => !ids.contains(id));
     }
+  }
+
+  void _setTypes(Set<String> next) {
+    setState(() {
+      _types = next;
+      _recompute();
+    });
+    widget.onFileTypesChanged?.call(Set.unmodifiable(next));
+  }
+
+  /// Picks or unpicks one file type in the filter.
+  void _toggleType(String type) {
+    _setTypes(
+      _types.contains(type) ? ({..._types}..remove(type)) : {..._types, type},
+    );
   }
 
   void _setExcluded(Set<String> next) {
@@ -417,7 +491,7 @@ class ImageAlbumState extends State<ImageAlbum> {
         onAddFolder: widget.onAddSource,
         onRemoveFolder: widget.onRemoveSource,
         excluded: _excluded,
-        shown: _flatPhotos.length,
+        shown: _inShownFolders,
         total: _allPhotos.length,
         loading: _loading,
         onChanged: _setExcluded,
@@ -467,6 +541,98 @@ class ImageAlbumState extends State<ImageAlbum> {
   void _toggle(AlbumPhoto photo) {
     setState(() {
       if (!_selected.remove(photo.id)) _selected.add(photo.id);
+      _anchor = photo.id;
+    });
+  }
+
+  /// Selects every photo from the anchor to [photo], in grid order. With
+  /// [keep] the photos already picked stay picked; without it the range
+  /// replaces them. The anchor stays put, so shift-clicking elsewhere
+  /// re-aims the range from the same start.
+  void _selectRange(
+    List<AlbumPhoto> flatPhotos,
+    AlbumPhoto photo, {
+    required bool keep,
+  }) {
+    final to = flatPhotos.indexWhere((p) => p.id == photo.id);
+    final from = _anchor == null
+        ? -1
+        : flatPhotos.indexWhere((p) => p.id == _anchor);
+    if (to < 0) return;
+    if (from < 0) {
+      // Nothing to range from yet: this one becomes the start.
+      setState(() {
+        if (!keep) _selected.clear();
+        _selected.add(photo.id);
+        _anchor = photo.id;
+      });
+      return;
+    }
+
+    final lo = from < to ? from : to;
+    final hi = from < to ? to : from;
+    setState(() {
+      if (!keep) _selected.clear();
+      for (var i = lo; i <= hi; i++) {
+        _selected.add(flatPhotos[i].id);
+      }
+    });
+  }
+
+  /// A click on a tile, or on its check badge when [openIfIdle] is false.
+  ///
+  /// Shift picks a range from the last pick (ctrl or cmd as well keeps what
+  /// was already picked), ctrl or cmd toggles just that photo, and a plain
+  /// click toggles while picking is under way and otherwise opens the photo.
+  void _click(
+    List<AlbumPhoto> flatPhotos,
+    AlbumPhoto photo, {
+    required bool openIfIdle,
+  }) {
+    // The click that ends a drag-select is not a click.
+    if (_dragKey.currentState?.justDragged ?? false) return;
+
+    final keyboard = HardwareKeyboard.instance;
+    final additive = keyboard.isControlPressed || keyboard.isMetaPressed;
+
+    if (keyboard.isShiftPressed) {
+      _selectRange(flatPhotos, photo, keep: additive);
+    } else if (additive || _selected.isNotEmpty || !openIfIdle) {
+      _toggle(photo);
+    } else {
+      _openPreview(flatPhotos, photo);
+    }
+  }
+
+  /// A long-press picks the photo, and keeping the finger down then sweeps
+  /// over more.
+  void _longPress(AlbumPhoto photo) {
+    if (_dragKey.currentState?.beginHold(photo) ?? false) return;
+    _toggle(photo);
+  }
+
+  /// A drag-select began on [photo]. Returns whether it picks (true) or
+  /// unpicks (false) the photos it crosses: unpicks only when it started on a
+  /// photo that was already picked.
+  bool _dragStart(AlbumPhoto photo) {
+    final select = !_selected.contains(photo.id);
+    _dragPaint([photo], select);
+    _anchor = photo.id;
+    return select;
+  }
+
+  void _dragPaint(Iterable<AlbumPhoto> photos, bool select) {
+    final ids = photos.map((photo) => photo.id);
+    final changes = select
+        ? ids.any((id) => !_selected.contains(id))
+        : ids.any(_selected.contains);
+    if (!changes) return;
+    setState(() {
+      if (select) {
+        _selected.addAll(ids);
+      } else {
+        _selected.removeAll(ids);
+      }
     });
   }
 
@@ -515,12 +681,12 @@ class ImageAlbumState extends State<ImageAlbum> {
           : _openFolderSheet,
       icon: Badge(
         smallSize: 8,
-        isLabelVisible: _allPhotos.length > _flatPhotos.length,
+        isLabelVisible: _allPhotos.length > _inShownFolders,
         child: const Icon(Icons.account_tree_outlined),
       ),
       selectedIcon: Badge(
         smallSize: 8,
-        isLabelVisible: _allPhotos.length > _flatPhotos.length,
+        isLabelVisible: _allPhotos.length > _inShownFolders,
         child: const Icon(Icons.account_tree),
       ),
     );
@@ -539,6 +705,31 @@ class ImageAlbumState extends State<ImageAlbum> {
       child: _albumBody(scheme),
     );
 
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.keyA, control: true): () =>
+            _selectAll(flatPhotos),
+        const SingleActivator(LogicalKeyboardKey.keyA, meta: true): () =>
+            _selectAll(flatPhotos),
+        if (selecting)
+          const SingleActivator(LogicalKeyboardKey.escape): () =>
+              setState(_selected.clear),
+      },
+      child: Focus(
+        autofocus: true,
+        child: _scaffold(flatPhotos, scheme, album, wide, showPanel),
+      ),
+    );
+  }
+
+  Widget _scaffold(
+    List<AlbumPhoto> flatPhotos,
+    ColorScheme scheme,
+    Widget album,
+    bool wide,
+    bool showPanel,
+  ) {
+    final selecting = _selected.isNotEmpty;
     return Scaffold(
       appBar: selecting
           ? AppBar(
@@ -619,8 +810,24 @@ class ImageAlbumState extends State<ImageAlbum> {
     final allHidden =
         !_loading &&
         _error == null &&
-        _sections.isEmpty &&
+        _inShownFolders == 0 &&
         _allPhotos.isNotEmpty;
+    final noneOfType =
+        !_loading && _error == null && _sections.isEmpty && _inShownFolders > 0;
+    if (noneOfType) {
+      return _centered(
+        AlbumStateView(
+          icon: Icons.filter_alt_off_outlined,
+          title: 'No photos of this type',
+          message: 'None of the photos here are ${_typeLabel(_types)}.',
+          action: OutlinedButton.icon(
+            onPressed: () => _setTypes(const {}),
+            icon: const Icon(Icons.filter_alt_off_outlined),
+            label: const Text('Show all types'),
+          ),
+        ),
+      );
+    }
     if (allHidden) {
       return _centered(
         AlbumStateView(
@@ -658,83 +865,129 @@ class ImageAlbumState extends State<ImageAlbum> {
               message: 'Nothing in this folder yet.',
             ),
       ),
-      _ => CustomScrollView(
+      _ => AlbumDragSelect(
+        key: _dragKey,
         controller: _gridController,
-        primary: false,
-        physics: const AlwaysScrollableScrollPhysics(),
-        slivers: [
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-              child: Row(
-                children: [
-                  Text(
-                    _countText,
-                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                      color: scheme.onSurfaceVariant,
+        onStart: _dragStart,
+        onPaint: _dragPaint,
+        child: CustomScrollView(
+          controller: _gridController,
+          primary: false,
+          physics: const AlwaysScrollableScrollPhysics(),
+          slivers: [
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+                child: Row(
+                  children: [
+                    Text(
+                      _countText,
+                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
                     ),
-                  ),
-                  if (_loading) ...[
-                    const SizedBox(width: 10),
-                    const SizedBox(
-                      width: 12,
-                      height: 12,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
+                    if (_loading) ...[
+                      const SizedBox(width: 10),
+                      const SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    ],
                   ],
-                ],
+                ),
               ),
             ),
-          ),
-          for (final section in _sections)
-            // A group per day, so that day's heading stays pinned only
-            // while its photos are on screen and the next day's heading
-            // then takes its place, rather than headings piling up.
-            SliverMainAxisGroup(
-              slivers: [
-                SliverPersistentHeader(
-                  pinned: true,
-                  delegate: AlbumDayHeaderDelegate(
-                    section,
-                    height: headerHeight,
+            if (_typeCounts.length > 1 || _types.isNotEmpty)
+              SliverToBoxAdapter(child: _typeBar(scheme)),
+            for (final section in _sections)
+              // A group per day, so that day's heading stays pinned only
+              // while its photos are on screen and the next day's heading
+              // then takes its place, rather than headings piling up.
+              SliverMainAxisGroup(
+                slivers: [
+                  SliverPersistentHeader(
+                    pinned: true,
+                    delegate: AlbumDayHeaderDelegate(
+                      section,
+                      height: headerHeight,
+                    ),
                   ),
-                ),
-                SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(10, 2, 10, 8),
-                  sliver: SliverGrid.builder(
-                    // Tiles stay about the same size and the number of
-                    // columns follows the width: three on a phone, many
-                    // more on a desktop window, rather than three huge
-                    // tiles.
-                    gridDelegate:
-                        const SliverGridDelegateWithMaxCrossAxisExtent(
-                          maxCrossAxisExtent: albumTileMaxExtent,
-                          mainAxisSpacing: 4,
-                          crossAxisSpacing: 4,
-                        ),
-                    itemCount: section.photos.length,
-                    itemBuilder: (context, index) {
-                      final photo = section.photos[index];
-                      return AlbumPhotoTile(
-                        key: ValueKey(photo.id),
-                        library: widget.library,
-                        photo: photo,
-                        selecting: selecting,
-                        selected: _selected.contains(photo.id),
-                        onTap: selecting
-                            ? () => _toggle(photo)
-                            : () => _openPreview(flatPhotos, photo),
-                        onToggle: () => _toggle(photo),
-                      );
-                    },
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(10, 2, 10, 8),
+                    sliver: SliverGrid.builder(
+                      // Tiles stay about the same size and the number of
+                      // columns follows the width: three on a phone, many
+                      // more on a desktop window, rather than three huge
+                      // tiles.
+                      gridDelegate:
+                          const SliverGridDelegateWithMaxCrossAxisExtent(
+                            maxCrossAxisExtent: albumTileMaxExtent,
+                            mainAxisSpacing: 4,
+                            crossAxisSpacing: 4,
+                          ),
+                      itemCount: section.photos.length,
+                      itemBuilder: (context, index) {
+                        final photo = section.photos[index];
+                        return AlbumPhotoTile(
+                          key: ValueKey(photo.id),
+                          library: widget.library,
+                          photo: photo,
+                          selecting: selecting,
+                          selected: _selected.contains(photo.id),
+                          onTap: () =>
+                              _click(flatPhotos, photo, openIfIdle: true),
+                          onToggle: () =>
+                              _click(flatPhotos, photo, openIfIdle: false),
+                          onLongPress: () => _longPress(photo),
+                        );
+                      },
+                    ),
                   ),
-                ),
-              ],
-            ),
-          const SliverToBoxAdapter(child: SizedBox(height: 24)),
-        ],
+                ],
+              ),
+            const SliverToBoxAdapter(child: SizedBox(height: 24)),
+          ],
+        ),
       ),
     };
+  }
+
+  /// "JPG", "JPG or PNG", "JPG, PNG or GIF".
+  static String _typeLabel(Set<String> types) {
+    final list = types.toList()..sort();
+    if (list.length < 2) return list.join();
+    return '${list.take(list.length - 1).join(', ')} or ${list.last}';
+  }
+
+  /// The row of file-type chips: one for everything, then one per type found.
+  /// Picking several shows all of them. A type that was picked and has since
+  /// run out of photos stays in the row, so it can be unpicked.
+  Widget _typeBar(ColorScheme scheme) {
+    final types = {..._typeCounts.keys, ..._types}.toList()..sort();
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 2),
+      child: Row(
+        children: [
+          ChoiceChip(
+            label: const Text('All'),
+            selected: _types.isEmpty,
+            onSelected: (_) => _setTypes(const {}),
+          ),
+          for (final type in types) ...[
+            const SizedBox(width: 8),
+            FilterChip(
+              label: Text(
+                '$type · ${albumFormatCount(_typeCounts[type] ?? 0)}',
+              ),
+              selected: _types.contains(type),
+              onSelected: (_) => _toggleType(type),
+            ),
+          ],
+        ],
+      ),
+    );
   }
 
   Widget _centered(Widget child) {

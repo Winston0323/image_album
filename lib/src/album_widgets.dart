@@ -221,6 +221,7 @@ class AlbumPhotoTile extends StatefulWidget {
     required this.selected,
     required this.onTap,
     required this.onToggle,
+    this.onLongPress,
     this.library,
   });
 
@@ -236,8 +237,12 @@ class AlbumPhotoTile extends StatefulWidget {
   final bool selected;
   final VoidCallback onTap;
 
-  /// Picks or unpicks this tile. Called by long-press and by the badge.
+  /// Picks or unpicks this tile. Called by the badge, and by a long-press
+  /// unless [onLongPress] says otherwise.
   final VoidCallback onToggle;
+
+  /// Called by a long-press. Defaults to [onToggle].
+  final VoidCallback? onLongPress;
 
   @override
   State<AlbumPhotoTile> createState() => _AlbumPhotoTileState();
@@ -259,99 +264,104 @@ class _AlbumPhotoTileState extends State<AlbumPhotoTile> {
       image: true,
       button: true,
       selected: selected,
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        onEnter: (_) => setState(() => _hovered = true),
-        onExit: (_) => setState(() => _hovered = false),
-        child: GestureDetector(
-          onTap: widget.onTap,
-          onLongPress: widget.onToggle,
-          child: AnimatedScale(
-            scale: selected ? 0.86 : 1,
-            duration: _quick,
-            curve: Curves.easeOutCubic,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(selected ? 12 : 8),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  ColoredBox(
-                    color: scheme.surfaceContainerHighest,
-                    child: Image(
-                      // Decoded at roughly tile resolution rather than full
-                      // size. The preview reuses this decode as its
-                      // placeholder.
-                      image: albumThumbnailProvider(
-                        widget.photo.file,
-                        library: widget.library,
-                      ),
-                      fit: BoxFit.cover,
-                      gaplessPlayback: true,
-                      frameBuilder: (context, child, frame, sync) {
-                        if (sync) return child;
-                        return AnimatedOpacity(
-                          opacity: frame == null ? 0 : 1,
-                          duration: const Duration(milliseconds: 240),
-                          curve: Curves.easeOut,
-                          child: child,
-                        );
-                      },
-                      errorBuilder: (_, _, _) => Center(
-                        child: Icon(
-                          Icons.broken_image_outlined,
-                          color: scheme.onSurfaceVariant,
+      // Lets a drag across the grid work out which photo is under the pointer.
+      child: MetaData(
+        metaData: widget.photo,
+        behavior: HitTestBehavior.translucent,
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          onEnter: (_) => setState(() => _hovered = true),
+          onExit: (_) => setState(() => _hovered = false),
+          child: GestureDetector(
+            onTap: widget.onTap,
+            onLongPress: widget.onLongPress ?? widget.onToggle,
+            child: AnimatedScale(
+              scale: selected ? 0.86 : 1,
+              duration: _quick,
+              curve: Curves.easeOutCubic,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(selected ? 12 : 8),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    ColoredBox(
+                      color: scheme.surfaceContainerHighest,
+                      child: Image(
+                        // Decoded at roughly tile resolution rather than full
+                        // size. The preview reuses this decode as its
+                        // placeholder.
+                        image: albumThumbnailProvider(
+                          widget.photo.file,
+                          library: widget.library,
                         ),
-                      ),
-                    ),
-                  ),
-                  // Darkens the top edge so the badge reads on pale photos.
-                  if (showBadge)
-                    const Positioned(
-                      left: 0,
-                      right: 0,
-                      top: 0,
-                      height: 44,
-                      child: IgnorePointer(
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              begin: Alignment.topCenter,
-                              end: Alignment.bottomCenter,
-                              colors: [Color(0x66000000), Color(0x00000000)],
-                            ),
+                        fit: BoxFit.cover,
+                        gaplessPlayback: true,
+                        frameBuilder: (context, child, frame, sync) {
+                          if (sync) return child;
+                          return AnimatedOpacity(
+                            opacity: frame == null ? 0 : 1,
+                            duration: const Duration(milliseconds: 240),
+                            curve: Curves.easeOut,
+                            child: child,
+                          );
+                        },
+                        errorBuilder: (_, _, _) => Center(
+                          child: Icon(
+                            Icons.broken_image_outlined,
+                            color: scheme.onSurfaceVariant,
                           ),
                         ),
                       ),
                     ),
-                  Positioned.fill(
-                    child: IgnorePointer(
-                      child: AnimatedContainer(
-                        duration: _quick,
-                        color: selected
-                            ? scheme.primary.withValues(alpha: 0.22)
-                            : _hovered
-                            ? Colors.white.withValues(alpha: 0.08)
-                            : Colors.transparent,
+                    // Darkens the top edge so the badge reads on pale photos.
+                    if (showBadge)
+                      const Positioned(
+                        left: 0,
+                        right: 0,
+                        top: 0,
+                        height: 44,
+                        child: IgnorePointer(
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                                colors: [Color(0x66000000), Color(0x00000000)],
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
-                    ),
-                  ),
-                  Positioned(
-                    left: 6,
-                    top: 6,
-                    child: AnimatedOpacity(
-                      opacity: showBadge ? 1 : 0,
-                      duration: _quick,
+                    Positioned.fill(
                       child: IgnorePointer(
-                        ignoring: !showBadge,
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTap: widget.onToggle,
-                          child: _CheckBadge(selected: selected),
+                        child: AnimatedContainer(
+                          duration: _quick,
+                          color: selected
+                              ? scheme.primary.withValues(alpha: 0.22)
+                              : _hovered
+                              ? Colors.white.withValues(alpha: 0.08)
+                              : Colors.transparent,
                         ),
                       ),
                     ),
-                  ),
-                ],
+                    Positioned(
+                      left: 6,
+                      top: 6,
+                      child: AnimatedOpacity(
+                        opacity: showBadge ? 1 : 0,
+                        duration: _quick,
+                        child: IgnorePointer(
+                          ignoring: !showBadge,
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: widget.onToggle,
+                            child: _CheckBadge(selected: selected),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),

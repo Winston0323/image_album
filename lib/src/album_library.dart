@@ -134,7 +134,8 @@ class AlbumIndexInfo {
 ///
 /// The folder holds
 ///
-/// - `album.json`, the manifest: [sources], [excluded], the [cache] options,
+/// - `album.json`, the manifest: [sources], [excluded], [fileTypes], the
+///   [cache] options,
 ///   and a record of each source's index;
 /// - `index/`, one file per source folder listing its photos with their sizes,
 ///   modification times and capture dates. Open it again and the album shows
@@ -166,6 +167,7 @@ class AlbumLibrary extends ChangeNotifier {
 
   List<String> _sources = [];
   Set<String> _excluded = {};
+  Set<String> _fileTypes = {};
   AlbumCacheOptions _cache = const AlbumCacheOptions();
   final Map<String, AlbumIndexInfo> _indexes = {};
 
@@ -201,6 +203,10 @@ class AlbumLibrary extends ChangeNotifier {
 
   /// The folders whose photos are hidden. Normalized.
   Set<String> get excluded => Set.unmodifiable(_excluded);
+
+  /// The file types the album is filtered to, as [albumFileType] labels such
+  /// as `JPG`. Empty means every type.
+  Set<String> get fileTypes => Set.unmodifiable(_fileTypes);
 
   /// How thumbnails are made and how much space they may take.
   AlbumCacheOptions get cache => _cache;
@@ -248,6 +254,16 @@ class AlbumLibrary extends ChangeNotifier {
     final next = {for (final folder in folders) p.normalize(folder)};
     if (setEquals(next, _excluded)) return;
     _excluded = next;
+    notifyListeners();
+    await _save();
+  }
+
+  /// Replaces the file types the album is filtered to. Empty shows every type.
+  Future<void> setFileTypes(Iterable<String> types) async {
+    final next = {for (final type in types) type.trim().toUpperCase()}
+      ..remove('');
+    if (setEquals(next, _fileTypes)) return;
+    _fileTypes = next;
     notifyListeners();
     await _save();
   }
@@ -347,6 +363,14 @@ class AlbumLibrary extends ChangeNotifier {
             if (folder is String && folder.isNotEmpty) p.normalize(folder),
         };
       }
+      final fileTypes = json['fileTypes'];
+      if (fileTypes is List) {
+        _fileTypes = {
+          for (final type in fileTypes)
+            if (type is String && type.trim().isNotEmpty)
+              type.trim().toUpperCase(),
+        };
+      }
       _cache = AlbumCacheOptions.fromJson(json['cache']);
       final indexes = json['indexes'];
       if (indexes is List) {
@@ -361,6 +385,7 @@ class AlbumLibrary extends ChangeNotifier {
       // Keep what was there for the user to find rather than overwrite it.
       _sources = [];
       _excluded = {};
+      _fileTypes = {};
       _cache = const AlbumCacheOptions();
       _indexes.clear();
       try {
@@ -411,6 +436,7 @@ class AlbumLibrary extends ChangeNotifier {
     'version': version,
     'sources': _sources,
     'excluded': _excluded.toList()..sort(),
+    'fileTypes': _fileTypes.toList()..sort(),
     'cache': _cache.toJson(),
     'indexes': [for (final info in _indexes.values) info._toJson()],
   };
