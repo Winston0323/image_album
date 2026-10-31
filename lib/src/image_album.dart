@@ -32,14 +32,16 @@ const double albumTileMaxExtent = 140;
 /// To select photos, then delete them:
 ///
 /// * Click a tile's check mark, or long-press a tile.
-/// * Ctrl-click (cmd-click) picks or unpicks one photo; shift-click picks
-///   the range from the last pick, and ctrl+shift-click adds that range to
-///   what is already picked.
+/// * Ctrl-click (cmd-click) picks or unpicks one photo. Shift-click adds
+///   every photo from the one picked last to the one clicked, leaving what
+///   is already picked alone. With nothing picked, the shift-clicked photo
+///   is the start.
 /// * Press the mouse on a tile and drag to pick every tile the pointer goes
 ///   over, or on a picked tile to unpick them. On a touch screen, long-press
 ///   and keep the finger down. The grid scrolls when the pointer reaches its
 ///   top or bottom edge.
-/// * Ctrl+A (cmd+A) picks everything and Escape lets go.
+/// * Ctrl+A (cmd+A) picks everything. Escape, or a click on empty space,
+///   lets go.
 ///
 /// The album does not choose folders itself. Give it [onAddSource] and
 /// [onRemoveSource] and the folder panel offers to add and remove sources;
@@ -545,45 +547,41 @@ class ImageAlbumState extends State<ImageAlbum> {
     });
   }
 
-  /// Selects every photo from the anchor to [photo], in grid order. With
-  /// [keep] the photos already picked stay picked; without it the range
-  /// replaces them. The anchor stays put, so shift-clicking elsewhere
-  /// re-aims the range from the same start.
-  void _selectRange(
-    List<AlbumPhoto> flatPhotos,
-    AlbumPhoto photo, {
-    required bool keep,
-  }) {
+  /// Shift-click: adds every photo from the one picked last, the start, to
+  /// [photo], the end, in grid order. Photos already picked are left as they
+  /// are, whether inside the range or not.
+  ///
+  /// When nothing is picked, or the last pick is no longer picked or shown,
+  /// there is no start, and [photo] becomes it. The end then is the start of
+  /// the next range, so shift-clicking again carries on from there.
+  void _selectRange(List<AlbumPhoto> flatPhotos, AlbumPhoto photo) {
     final to = flatPhotos.indexWhere((p) => p.id == photo.id);
-    final from = _anchor == null
-        ? -1
-        : flatPhotos.indexWhere((p) => p.id == _anchor);
     if (to < 0) return;
-    if (from < 0) {
-      // Nothing to range from yet: this one becomes the start.
-      setState(() {
-        if (!keep) _selected.clear();
-        _selected.add(photo.id);
-        _anchor = photo.id;
-      });
-      return;
-    }
 
-    final lo = from < to ? from : to;
-    final hi = from < to ? to : from;
+    final start = _anchor;
+    final from = start != null && _selected.contains(start)
+        ? flatPhotos.indexWhere((p) => p.id == start)
+        : -1;
+
     setState(() {
-      if (!keep) _selected.clear();
-      for (var i = lo; i <= hi; i++) {
-        _selected.add(flatPhotos[i].id);
+      if (from < 0) {
+        _selected.add(photo.id);
+      } else {
+        final lo = from < to ? from : to;
+        final hi = from < to ? to : from;
+        for (var i = lo; i <= hi; i++) {
+          _selected.add(flatPhotos[i].id);
+        }
       }
+      _anchor = photo.id;
     });
   }
 
   /// A click on a tile, or on its check badge when [openIfIdle] is false.
   ///
-  /// Shift picks a range from the last pick (ctrl or cmd as well keeps what
-  /// was already picked), ctrl or cmd toggles just that photo, and a plain
-  /// click toggles while picking is under way and otherwise opens the photo.
+  /// Shift adds the range from the last pick to the clicked photo, ctrl or cmd
+  /// toggles just that photo, and a plain click toggles while picking is under
+  /// way and otherwise opens the photo.
   void _click(
     List<AlbumPhoto> flatPhotos,
     AlbumPhoto photo, {
@@ -596,12 +594,22 @@ class ImageAlbumState extends State<ImageAlbum> {
     final additive = keyboard.isControlPressed || keyboard.isMetaPressed;
 
     if (keyboard.isShiftPressed) {
-      _selectRange(flatPhotos, photo, keep: additive);
+      _selectRange(flatPhotos, photo);
     } else if (additive || _selected.isNotEmpty || !openIfIdle) {
       _toggle(photo);
     } else {
       _openPreview(flatPhotos, photo);
     }
+  }
+
+  /// A tap on empty space between and around the tiles unpicks everything.
+  void _clickBlank() {
+    if (_selected.isEmpty) return;
+    if (_dragKey.currentState?.justDragged ?? false) return;
+    setState(() {
+      _selected.clear();
+      _anchor = null;
+    });
   }
 
   /// A long-press picks the photo, and keeping the finger down then sweeps
@@ -622,7 +630,7 @@ class ImageAlbumState extends State<ImageAlbum> {
   }
 
   void _dragPaint(Iterable<AlbumPhoto> photos, bool select) {
-    final ids = photos.map((photo) => photo.id);
+    final ids = photos.map((photo) => photo.id).toList();
     final changes = select
         ? ids.any((id) => !_selected.contains(id))
         : ids.any(_selected.contains);
@@ -630,6 +638,8 @@ class ImageAlbumState extends State<ImageAlbum> {
     setState(() {
       if (select) {
         _selected.addAll(ids);
+        // The last photo the sweep picked is where a shift-click continues.
+        _anchor = ids.last;
       } else {
         _selected.removeAll(ids);
       }
@@ -870,84 +880,90 @@ class ImageAlbumState extends State<ImageAlbum> {
         controller: _gridController,
         onStart: _dragStart,
         onPaint: _dragPaint,
-        child: CustomScrollView(
-          controller: _gridController,
-          primary: false,
-          physics: const AlwaysScrollableScrollPhysics(),
-          slivers: [
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-                child: Row(
-                  children: [
-                    Text(
-                      _countText,
-                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                        color: scheme.onSurfaceVariant,
+        // A tap on bare space, which no tile, chip or button takes, lets go
+        // of the selection.
+        child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTap: _clickBlank,
+          child: CustomScrollView(
+            controller: _gridController,
+            primary: false,
+            physics: const AlwaysScrollableScrollPhysics(),
+            slivers: [
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+                  child: Row(
+                    children: [
+                      Text(
+                        _countText,
+                        style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
                       ),
-                    ),
-                    if (_loading) ...[
-                      const SizedBox(width: 10),
-                      const SizedBox(
-                        width: 12,
-                        height: 12,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
+                      if (_loading) ...[
+                        const SizedBox(width: 10),
+                        const SizedBox(
+                          width: 12,
+                          height: 12,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      ],
                     ],
-                  ],
+                  ),
                 ),
               ),
-            ),
-            if (_typeCounts.length > 1 || _types.isNotEmpty)
-              SliverToBoxAdapter(child: _typeBar(scheme)),
-            for (final section in _sections)
-              // A group per day, so that day's heading stays pinned only
-              // while its photos are on screen and the next day's heading
-              // then takes its place, rather than headings piling up.
-              SliverMainAxisGroup(
-                slivers: [
-                  SliverPersistentHeader(
-                    pinned: true,
-                    delegate: AlbumDayHeaderDelegate(
-                      section,
-                      height: headerHeight,
+              if (_typeCounts.length > 1 || _types.isNotEmpty)
+                SliverToBoxAdapter(child: _typeBar(scheme)),
+              for (final section in _sections)
+                // A group per day, so that day's heading stays pinned only
+                // while its photos are on screen and the next day's heading
+                // then takes its place, rather than headings piling up.
+                SliverMainAxisGroup(
+                  slivers: [
+                    SliverPersistentHeader(
+                      pinned: true,
+                      delegate: AlbumDayHeaderDelegate(
+                        section,
+                        height: headerHeight,
+                      ),
                     ),
-                  ),
-                  SliverPadding(
-                    padding: const EdgeInsets.fromLTRB(10, 2, 10, 8),
-                    sliver: SliverGrid.builder(
-                      // Tiles stay about the same size and the number of
-                      // columns follows the width: three on a phone, many
-                      // more on a desktop window, rather than three huge
-                      // tiles.
-                      gridDelegate:
-                          const SliverGridDelegateWithMaxCrossAxisExtent(
-                            maxCrossAxisExtent: albumTileMaxExtent,
-                            mainAxisSpacing: 4,
-                            crossAxisSpacing: 4,
-                          ),
-                      itemCount: section.photos.length,
-                      itemBuilder: (context, index) {
-                        final photo = section.photos[index];
-                        return AlbumPhotoTile(
-                          key: ValueKey(photo.id),
-                          library: widget.library,
-                          photo: photo,
-                          selecting: selecting,
-                          selected: _selected.contains(photo.id),
-                          onTap: () =>
-                              _click(flatPhotos, photo, openIfIdle: true),
-                          onToggle: () =>
-                              _click(flatPhotos, photo, openIfIdle: false),
-                          onLongPress: () => _longPress(photo),
-                        );
-                      },
+                    SliverPadding(
+                      padding: const EdgeInsets.fromLTRB(10, 2, 10, 8),
+                      sliver: SliverGrid.builder(
+                        // Tiles stay about the same size and the number of
+                        // columns follows the width: three on a phone, many
+                        // more on a desktop window, rather than three huge
+                        // tiles.
+                        gridDelegate:
+                            const SliverGridDelegateWithMaxCrossAxisExtent(
+                              maxCrossAxisExtent: albumTileMaxExtent,
+                              mainAxisSpacing: 4,
+                              crossAxisSpacing: 4,
+                            ),
+                        itemCount: section.photos.length,
+                        itemBuilder: (context, index) {
+                          final photo = section.photos[index];
+                          return AlbumPhotoTile(
+                            key: ValueKey(photo.id),
+                            library: widget.library,
+                            photo: photo,
+                            selecting: selecting,
+                            selected: _selected.contains(photo.id),
+                            onTap: () =>
+                                _click(flatPhotos, photo, openIfIdle: true),
+                            onToggle: () =>
+                                _click(flatPhotos, photo, openIfIdle: false),
+                            onLongPress: () => _longPress(photo),
+                          );
+                        },
+                      ),
                     ),
-                  ),
-                ],
-              ),
-            const SliverToBoxAdapter(child: SizedBox(height: 24)),
-          ],
+                  ],
+                ),
+              const SliverToBoxAdapter(child: SizedBox(height: 24)),
+            ],
+          ),
         ),
       ),
     };
