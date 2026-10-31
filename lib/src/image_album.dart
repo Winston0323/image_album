@@ -1,22 +1,36 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 
+import 'album_folders.dart';
+import 'album_library.dart';
 import 'album_photo.dart';
 import 'album_preview_page.dart';
+import 'album_widgets.dart';
 
 /// Asks whether [count] selected photos should be deleted. Return true to
 /// delete the files.
-typedef ConfirmAlbumDelete = Future<bool> Function(
-  BuildContext context,
-  int count,
-);
+typedef ConfirmAlbumDelete =
+    Future<bool> Function(BuildContext context, int count);
 
-/// Full-screen album of the images in [path].
+/// About how wide a grid tile gets, in logical pixels. Three columns fit on
+/// phones up to about 420 dp; beyond that columns are added instead of growing
+/// tiles. The columns share the width evenly, so a tile can be a hair wider.
+const double albumTileMaxExtent = 140;
+
+/// Full-screen album of the images in one or more source folders.
 ///
-/// Lists image files in that directory and lays them out as a three-column
-/// grid grouped by day, newest first. Tap a tile to open the swipe preview;
+/// Pass one folder as [path], or several as [paths]; their photos are merged
+/// into a single grid grouped by day, newest first. Tiles are about
+/// [albumTileMaxExtent] wide at most, so a phone gets three columns and a wider
+/// window gets proportionally more. Tap a tile to open the swipe preview;
 /// long-press to select, then delete. Set [recursive] to include subfolders.
+///
+/// The album does not choose folders itself. Give it [onAddSource] and
+/// [onRemoveSource] and the folder panel offers to add and remove sources;
+/// the app picks the folder, changes [paths], and passes the new list in.
+/// Sources already scanned are kept, so adding one only scans the new folder.
 ///
 /// Own scroll controller, with `primary: false`, so the album can sit in an
 /// [IndexedStack] beside other scrollables without sharing the ambient
@@ -24,21 +38,70 @@ typedef ConfirmAlbumDelete = Future<bool> Function(
 class ImageAlbum extends StatefulWidget {
   const ImageAlbum({
     super.key,
-    required this.path,
+    this.path,
+    this.paths,
     this.title = const Text('Album'),
     this.actions = const [],
     this.empty,
     this.countLabel,
     this.confirmDelete,
     this.recursive = false,
-  });
+    this.initialExcludedFolders = const {},
+    this.onExcludedFoldersChanged,
+    this.onAddSource,
+    this.onRemoveSource,
+    this.library,
+  }) : assert(
+         (path == null) != (paths == null),
+         'Pass either path or paths, not both',
+       );
 
-  /// Directory whose image files are shown. See [loadAlbumPhotos].
-  final String path;
+  /// The one folder whose image files are shown. Use [paths] for several.
+  /// See [loadAlbumPhotos].
+  final String? path;
 
-  /// When true, images in subfolders of [path] are included. Links are not
-  /// followed. Defaults to false, which lists only files directly in [path].
+  /// The folders whose image files are shown together. May be empty, which
+  /// shows an invitation to add one when [onAddSource] is set.
+  final List<String>? paths;
+
+  /// Every source folder, however they were given.
+  List<String> get sources => paths ?? [path!];
+
+  /// When true, images in subfolders of each source are included, and a
+  /// folder tree lets the user hide any of them. Links are not followed.
+  /// Defaults to false, which lists only files directly in each source.
   final bool recursive;
+
+  /// The album file whose caches to use. With it, a folder opened before shows
+  /// its photos at once from the saved index while the folder is checked again,
+  /// thumbnails are kept in the file and made to its [AlbumLibrary.cache]
+  /// options, and each scan is recorded in it. Without, the caches live in the
+  /// system temp directory, which the OS may clear.
+  ///
+  /// The album only uses the library's caches. Which folders to show and which
+  /// to hide still come from [paths] and [initialExcludedFolders]; keep them
+  /// in the library with [AlbumLibrary.addSource] and friends if you like.
+  final AlbumLibrary? library;
+
+  /// Called when the user asks to add a source folder. Set it, with
+  /// [onRemoveSource], to let the user manage sources from the folder panel.
+  final VoidCallback? onAddSource;
+
+  /// Called with a source's path when the user asks to remove it. The album
+  /// keeps showing it until [paths] no longer lists it.
+  final ValueChanged<String>? onRemoveSource;
+
+  /// Folders hidden when the album opens: their photos, and those in folders
+  /// below them, are left out. Paths as [onExcludedFoldersChanged] reports
+  /// them. Read when the album is created; after that the user's choices in
+  /// the folder tree take over. Paths are absolute, so one set serves every
+  /// source.
+  final Set<String> initialExcludedFolders;
+
+  /// Called with the full set of hidden folders each time the user changes it,
+  /// so the choice can be saved and passed back as [initialExcludedFolders]
+  /// next time.
+  final ValueChanged<Set<String>>? onExcludedFoldersChanged;
 
   /// App-bar title while nothing is selected.
   final Widget title;
@@ -67,12 +130,47 @@ class ImageAlbumState extends State<ImageAlbum> {
   final ScrollController _fillerController = ScrollController();
 
   List<AlbumDaySection> _sections = const [];
+
+  /// Every photo in grid order. Kept beside [_sections] rather than rebuilt in
+  /// [build], which runs on every selection change and scan batch.
+  List<AlbumPhoto> _flatPhotos = const [];
+
+  /// Everything found in all sources, before hidden folders are taken out.
+  List<AlbumPhoto> _allPhotos = const [];
+
+  /// What each source's scan has found so far, hidden folders not yet taken
+  /// out, newest first. Kept per source so that hiding a folder is instant, a
+  /// dropped source needs no rescan of the others, and a hidden folder is only
+  /// looked for inside the source it was chosen in.
+  final Map<String, List<AlbumPhoto>> _found = {};
+
+  /// Why each source that could not be read failed.
+  final Map<String, String> _errors = {};
+
+  /// The source folders as normalized paths, in the order given.
+  late List<String> _sources;
+
+  /// Normalized paths of the hidden folders.
+  late Set<String> _excluded;
+
+  List<AlbumFolderNode>? _trees;
+  bool _treeStale = true;
+  final Stopwatch _treeAge = Stopwatch();
+
+  /// Bumped whenever the folder panel's inputs change, so a panel shown in a
+  /// bottom sheet (a separate route) updates along with the grid.
+  final ValueNotifier<int> _foldersRevision = ValueNotifier(0);
+
+  /// Whether the user closed the side panel on a wide window.
+  bool _panelHidden = false;
+
   bool _loading = true;
   String? _error;
-  int _loadGeneration = 0;
-  AlbumLoadToken? _scan;
+
+  /// The scan running for each source. A scan whose token is no longer the
+  /// one recorded here was replaced or cancelled, and its results are dropped.
+  final Map<String, AlbumLoadToken> _scans = {};
   Timer? _progressTimer;
-  List<AlbumPhoto>? _pendingFound;
 
   /// Photos picked for deletion, by [AlbumPhoto.id]. Non-empty is what puts
   /// the screen in selection mode.
@@ -81,114 +179,286 @@ class ImageAlbumState extends State<ImageAlbum> {
   @override
   void initState() {
     super.initState();
-    _load(showSpinner: false);
+    _sources = _normalizedSources();
+    _excluded = _normalized(widget.initialExcludedFolders);
+    _startScans(_sources);
   }
 
   @override
   void didUpdateWidget(ImageAlbum oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.path != widget.path ||
-        oldWidget.recursive != widget.recursive) {
+    final sources = _normalizedSources();
+    if (oldWidget.recursive != widget.recursive) {
+      // Everything found so far was found the other way.
       _selected.clear();
-      _loading = true;
-      _error = null;
-      _sections = const [];
-      _load(showSpinner: false);
+      _sources = sources;
+      _found.clear();
+      _errors.clear();
+      _startScans(_sources);
+      _rebuildData();
+      _trees = null;
+    } else if (!_sameList(sources, _sources)) {
+      final removed = _sources.where((s) => !sources.contains(s)).toList();
+      final added = sources.where((s) => !_sources.contains(s)).toList();
+      for (final source in removed) {
+        _scans.remove(source)?.cancel();
+        _found.remove(source);
+        _errors.remove(source);
+      }
+      _sources = sources;
+      // Sources that stay are not scanned again.
+      _startScans(added);
+      _rebuildData();
+      _trees = null;
+    } else {
+      return;
     }
+    // A folder sheet is on another route, which this rebuild does not reach.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _foldersRevision.value++;
+    });
   }
+
+  List<String> _normalizedSources() =>
+      {for (final path in widget.sources) p.normalize(path)}.toList();
+
+  static bool _sameList(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  static Set<String> _normalized(Set<String> paths) => {
+    for (final path in paths) p.normalize(path),
+  };
 
   @override
   void dispose() {
     _progressTimer?.cancel();
-    _scan?.cancel();
+    for (final scan in _scans.values) {
+      scan.cancel();
+    }
     _gridController.dispose();
     _fillerController.dispose();
+    _foldersRevision.dispose();
     super.dispose();
   }
 
-  /// Re-reads [ImageAlbum.path]. Safe to call after files appear or disappear
-  /// outside this widget.
-  Future<void> reload() => _load();
+  /// Re-reads every source folder. Safe to call after files appear or
+  /// disappear outside this widget.
+  Future<void> reload() {
+    _errors.clear();
+    final done = _startScans(_sources);
+    if (mounted) setState(_rebuildData);
+    return done;
+  }
 
-  Future<void> _load({bool showSpinner = true}) async {
-    _progressTimer?.cancel();
-    _progressTimer = null;
-    _pendingFound = null;
-    _scan?.cancel();
-    final scan = AlbumLoadToken();
-    _scan = scan;
-    final generation = ++_loadGeneration;
-    if (showSpinner) {
-      if (!mounted) return;
-      setState(() {
-        _loading = true;
-        _error = null;
-      });
+  /// Starts scanning [sources], replacing any scan already running for them.
+  /// Completes when all of them have finished.
+  Future<void> _startScans(Iterable<String> sources) {
+    final started = <Future<void>>[];
+    for (final source in sources) {
+      _scans.remove(source)?.cancel();
+      _errors.remove(source);
+      final token = AlbumLoadToken();
+      _scans[source] = token;
+      started.add(_scan(source, token));
     }
+    _loading = _scans.isNotEmpty;
+    _error = null;
+    return Future.wait(started);
+  }
+
+  Future<void> _scan(String source, AlbumLoadToken token) async {
+    final library = widget.library;
+    final recursive = widget.recursive;
     try {
+      // A folder seen before shows its photos at once, from the saved index.
+      if (library != null && (_found[source]?.isEmpty ?? true)) {
+        final indexed = await readAlbumIndex(
+          source,
+          recursive: recursive,
+          cacheDirectory: library.indexDirectory,
+        );
+        if (!mounted || !identical(_scans[source], token)) return;
+        if (indexed.isNotEmpty) _publishFound(source, token, indexed);
+      }
+      // With photos already on screen, the scan's partial lists would shrink
+      // the grid before growing it again, so only its final answer is used.
+      final showing = _found[source]?.isNotEmpty ?? false;
       final photos = await loadAlbumPhotos(
-        widget.path,
-        recursive: widget.recursive,
-        token: scan,
-        onProgress: (found) => _publishFound(generation, found),
+        source,
+        recursive: recursive,
+        token: token,
+        cacheDirectory: library?.indexDirectory,
+        onProgress: showing
+            ? null
+            : (found) => _publishFound(source, token, found),
       );
-      _publishFound(generation, photos, done: true);
+      final current = identical(_scans[source], token);
+      _publishFound(source, token, photos, done: true);
+      if (current && library != null) {
+        unawaited(library.recordScan(source, recursive, photos.length));
+      }
     } catch (e) {
-      if (!mounted || generation != _loadGeneration) return;
-      _progressTimer?.cancel();
-      _progressTimer = null;
-      setState(() {
-        _error = '$e';
-        _loading = false;
-      });
+      if (!mounted || !identical(_scans[source], token)) return;
+      _errors[source] = '$e';
+      _publishFound(source, token, const [], done: true);
     }
   }
 
   /// Applies a scan batch. The first tiles show up immediately; later batches
   /// are coalesced so rebuilding the grid does not hitch every few files.
   void _publishFound(
-    int generation,
+    String source,
+    AlbumLoadToken token,
     List<AlbumPhoto> found, {
     bool done = false,
   }) {
-    if (!mounted || generation != _loadGeneration) return;
-    if (done) {
+    if (!mounted || !identical(_scans[source], token)) return;
+    _found[source] = found;
+    if (done) _scans.remove(source);
+    if (_scans.isEmpty) {
       _progressTimer?.cancel();
       _progressTimer = null;
-      _pendingFound = null;
-      _applyFound(found, loading: false);
+      _applyFound();
       return;
     }
-    _pendingFound = found;
     if (_sections.isEmpty) {
-      _applyFound(found, loading: true);
+      _applyFound();
       return;
     }
     _progressTimer ??= Timer(const Duration(milliseconds: 100), () {
       _progressTimer = null;
-      final pending = _pendingFound;
-      if (pending == null || !mounted || generation != _loadGeneration) return;
-      _applyFound(pending, loading: true);
+      if (mounted) _applyFound();
     });
   }
 
-  void _applyFound(List<AlbumPhoto> found, {required bool loading}) {
+  void _applyFound() {
+    setState(_rebuildData);
+    _foldersRevision.value++;
+  }
+
+  /// Rebuilds what the grid shows from what the scans have found. Call inside
+  /// [setState], or where a build follows anyway.
+  void _rebuildData() {
+    _allPhotos = mergeAlbumPhotos([
+      for (final source in _sources) _found[source] ?? const [],
+    ]);
+    _treeStale = true;
+    _recompute();
+    _loading = _scans.isNotEmpty;
+    // An error is only reported when no source could be read at all; a
+    // folder that fails among others is left out.
+    _error =
+        !_loading && _sources.isNotEmpty && _sources.every(_errors.containsKey)
+        ? _errors.values.first
+        : null;
+  }
+
+  /// Rebuilds what the grid shows from the found photos and the hidden
+  /// folders. Call inside [setState].
+  void _recompute() {
+    // With one source and nothing hidden, the scan is already in grid order
+    // and doubles as the flat list.
+    final visible = mergeAlbumPhotos([
+      for (final source in _sources)
+        filterAlbumByExcluded(_found[source] ?? const [], source, _excluded),
+    ]);
+    _flatPhotos = visible;
+    _sections = groupAlbumByDay(visible);
+    if (_selected.isNotEmpty) {
+      final ids = {for (final photo in visible) photo.id};
+      _selected.removeWhere((id) => !ids.contains(id));
+    }
+  }
+
+  void _setExcluded(Set<String> next) {
     setState(() {
-      _sections = groupAlbumByDay(found);
-      _selected.removeWhere(
-        (id) => !found.any((photo) => photo.id == id),
-      );
-      _loading = loading;
-      _error = null;
+      _excluded = next;
+      _recompute();
     });
+    _foldersRevision.value++;
+    widget.onExcludedFoldersChanged?.call(Set.unmodifiable(next));
+  }
+
+  /// One folder tree per source, of everything found. While scans run they are
+  /// rebuilt at most twice a second, since building walks every photo.
+  List<AlbumFolderNode> get _folderTrees {
+    final current = _trees;
+    final fresh =
+        current != null &&
+        (!_treeStale || (_loading && _treeAge.elapsedMilliseconds < 500));
+    if (fresh) return current;
+    _treeStale = false;
+    _treeAge
+      ..reset()
+      ..start();
+    return _trees = [
+      for (final source in _sources)
+        buildAlbumFolderTree(_found[source] ?? const [], source),
+    ];
+  }
+
+  /// Whether there is a folder panel at all: with subfolders to hide, or
+  /// sources to manage.
+  bool get _hasPanel =>
+      widget.recursive ||
+      widget.onAddSource != null ||
+      widget.onRemoveSource != null;
+
+  Widget _folderPanel({VoidCallback? onClose}) {
+    return ListenableBuilder(
+      listenable: _foldersRevision,
+      builder: (context, _) => AlbumFolderPanel(
+        roots: _folderTrees,
+        onAddFolder: widget.onAddSource,
+        onRemoveFolder: widget.onRemoveSource,
+        excluded: _excluded,
+        shown: _flatPhotos.length,
+        total: _allPhotos.length,
+        loading: _loading,
+        onChanged: _setExcluded,
+        onClose: onClose,
+      ),
+    );
+  }
+
+  /// Wide windows keep the folder tree beside the grid; narrow ones open it
+  /// from the bar as a sheet.
+  static const double _sidePanelMinWidth = 900;
+  static const double _sidePanelWidth = 300;
+
+  void _openFolderSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (sheetContext) => SizedBox(
+        height: MediaQuery.sizeOf(sheetContext).height * 0.7,
+        child: _folderPanel(onClose: () => Navigator.of(sheetContext).pop()),
+      ),
+    );
   }
 
   void _openPreview(List<AlbumPhoto> flatPhotos, AlbumPhoto photo) {
     Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => AlbumPreviewPage(
+      // Fades up from the grid rather than sliding over it: the photo is the
+      // only thing that changes, so the motion stays out of the way.
+      PageRouteBuilder<void>(
+        transitionDuration: const Duration(milliseconds: 220),
+        reverseTransitionDuration: const Duration(milliseconds: 180),
+        pageBuilder: (_, _, _) => AlbumPreviewPage(
           photos: flatPhotos,
           initialIndex: flatPhotos.indexOf(photo),
+          library: widget.library,
+        ),
+        transitionsBuilder: (_, animation, _, child) => FadeTransition(
+          opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
+          child: child,
         ),
       ),
     );
@@ -205,8 +475,9 @@ class ImageAlbumState extends State<ImageAlbum> {
   }
 
   Future<void> _deleteSelected(List<AlbumPhoto> flatPhotos) async {
-    final picked =
-        flatPhotos.where((photo) => _selected.contains(photo.id)).toList();
+    final picked = flatPhotos
+        .where((photo) => _selected.contains(photo.id))
+        .toList();
     if (picked.isEmpty) return;
 
     final confirm = widget.confirmDelete ?? _defaultConfirm;
@@ -218,122 +489,252 @@ class ImageAlbumState extends State<ImageAlbum> {
     }
     if (!mounted) return;
     setState(() => _selected.clear());
-    await _load();
+    await reload();
   }
 
-  int get _totalPhotos =>
-      _sections.fold(0, (sum, section) => sum + section.photos.length);
+  int get _totalPhotos => _flatPhotos.length;
 
   String get _countText {
     final label = widget.countLabel;
     if (label != null) return label(_totalPhotos);
-    return _totalPhotos == 1 ? '1 photo' : '$_totalPhotos photos';
+    final count = albumFormatCount(_totalPhotos);
+    final text = _totalPhotos == 1 ? '1 photo' : '$count photos';
+    final hidden = _allPhotos.length - _totalPhotos;
+    return hidden > 0 ? '$text · ${albumFormatCount(hidden)} hidden' : text;
+  }
+
+  /// The bar button for the folder tree: it toggles the side panel on a wide
+  /// window and opens the sheet on a narrow one. A dot marks hidden folders.
+  Widget _foldersButton(bool wide) {
+    final open = wide && !_panelHidden;
+    return IconButton(
+      tooltip: 'Folders',
+      isSelected: open,
+      onPressed: wide
+          ? () => setState(() => _panelHidden = !_panelHidden)
+          : _openFolderSheet,
+      icon: Badge(
+        smallSize: 8,
+        isLabelVisible: _allPhotos.length > _flatPhotos.length,
+        child: const Icon(Icons.account_tree_outlined),
+      ),
+      selectedIcon: Badge(
+        smallSize: 8,
+        isLabelVisible: _allPhotos.length > _flatPhotos.length,
+        child: const Icon(Icons.account_tree),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final flatPhotos = [
-      for (final section in _sections) ...section.photos,
-    ];
+    final flatPhotos = _flatPhotos;
     final selecting = _selected.isNotEmpty;
+    final scheme = Theme.of(context).colorScheme;
+    final wide = MediaQuery.sizeOf(context).width >= _sidePanelMinWidth;
+    final showPanel = _hasPanel && wide && !_panelHidden;
+
+    final album = RefreshIndicator(
+      onRefresh: reload,
+      child: _albumBody(scheme),
+    );
 
     return Scaffold(
       appBar: selecting
           ? AppBar(
+              backgroundColor: scheme.surfaceContainerHigh,
+              foregroundColor: scheme.onSurface,
               leading: IconButton(
                 tooltip: 'Cancel selection',
                 onPressed: () => setState(_selected.clear),
-                icon: const Icon(Icons.close),
+                icon: const Icon(Icons.close_rounded),
               ),
-              title: Text('${_selected.length} selected'),
+              title: Text(
+                '${_selected.length} selected',
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
               actions: [
                 IconButton(
                   tooltip: 'Select all',
                   onPressed: _selected.length == flatPhotos.length
                       ? null
                       : () => _selectAll(flatPhotos),
-                  icon: const Icon(Icons.select_all),
+                  icon: const Icon(Icons.select_all_rounded),
                 ),
                 IconButton(
                   tooltip: 'Delete',
                   onPressed: () => _deleteSelected(flatPhotos),
-                  icon: const Icon(Icons.delete_outline),
+                  icon: const Icon(Icons.delete_outline_rounded),
+                ),
+                const SizedBox(width: 4),
+              ],
+            )
+          : AppBar(
+              title: widget.title,
+              actions: [
+                ...widget.actions,
+                if (_hasPanel) _foldersButton(wide),
+                const SizedBox(width: 4),
+              ],
+              centerTitle: false,
+            ),
+      body: showPanel
+          ? Row(
+              children: [
+                Expanded(child: album),
+                VerticalDivider(width: 1, color: scheme.outlineVariant),
+                SizedBox(
+                  width: _sidePanelWidth,
+                  child: _folderPanel(
+                    onClose: () => setState(() => _panelHidden = true),
+                  ),
                 ),
               ],
             )
-          : AppBar(title: widget.title, actions: widget.actions),
-      body: RefreshIndicator(
-        onRefresh: () => _load(),
-        child: switch ((_loading, _error, _sections.isEmpty)) {
-          (_, final error?, _) => _centered(
-              _ErrorBody(message: error, onRetry: () => _load()),
+          : album,
+    );
+  }
+
+  Widget _albumBody(ColorScheme scheme) {
+    final flatPhotos = _flatPhotos;
+    final selecting = _selected.isNotEmpty;
+    final headerHeight = AlbumDayHeaderDelegate.heightFor(context);
+    if (_sources.isEmpty) {
+      final add = widget.onAddSource;
+      return _centered(
+        AlbumStateView(
+          icon: Icons.create_new_folder_outlined,
+          title: 'No folders yet',
+          message: 'Add a folder to see its photos.',
+          action: add == null
+              ? null
+              : FilledButton.icon(
+                  onPressed: add,
+                  icon: const Icon(Icons.add_rounded),
+                  label: const Text('Add folder'),
+                ),
+        ),
+      );
+    }
+    final allHidden =
+        !_loading &&
+        _error == null &&
+        _sections.isEmpty &&
+        _allPhotos.isNotEmpty;
+    if (allHidden) {
+      return _centered(
+        AlbumStateView(
+          icon: Icons.folder_off_outlined,
+          title: 'All folders are hidden',
+          message: 'Every photo is in a folder you have hidden.',
+          action: OutlinedButton.icon(
+            onPressed: () => _setExcluded(const {}),
+            icon: const Icon(Icons.visibility_outlined),
+            label: const Text('Show all folders'),
+          ),
+        ),
+      );
+    }
+    return switch ((_loading, _error, _sections.isEmpty)) {
+      (_, final error?, _) => _centered(
+        AlbumStateView(
+          icon: Icons.error_outline_rounded,
+          color: scheme.error,
+          title: 'Could not load the album',
+          message: error,
+          action: OutlinedButton.icon(
+            onPressed: reload,
+            icon: const Icon(Icons.refresh_rounded),
+            label: const Text('Retry'),
+          ),
+        ),
+      ),
+      (true, null, true) => _centered(const CircularProgressIndicator()),
+      (false, null, true) => _centered(
+        widget.empty ??
+            const AlbumStateView(
+              icon: Icons.photo_library_outlined,
+              title: 'No photos',
+              message: 'Nothing in this folder yet.',
             ),
-          (true, null, true) => _centered(const CircularProgressIndicator()),
-          (false, null, true) =>
-            _centered(widget.empty ?? const _DefaultEmpty()),
-          _ => CustomScrollView(
-              controller: _gridController,
-              primary: false,
-              physics: const AlwaysScrollableScrollPhysics(),
-              slivers: [
-                SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-                  sliver: SliverToBoxAdapter(
-                    child: Row(
-                      children: [
-                        Text(
-                          _countText,
-                          style:
-                              Theme.of(context).textTheme.bodySmall?.copyWith(
-                                    color: Theme.of(context).hintColor,
-                                  ),
-                        ),
-                        if (_loading) ...[
-                          const SizedBox(width: 8),
-                          const SizedBox(
-                            width: 12,
-                            height: 12,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                        ],
-                      ],
+      ),
+      _ => CustomScrollView(
+        controller: _gridController,
+        primary: false,
+        physics: const AlwaysScrollableScrollPhysics(),
+        slivers: [
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+              child: Row(
+                children: [
+                  Text(
+                    _countText,
+                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                      color: scheme.onSurfaceVariant,
                     ),
+                  ),
+                  if (_loading) ...[
+                    const SizedBox(width: 10),
+                    const SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          for (final section in _sections)
+            // A group per day, so that day's heading stays pinned only
+            // while its photos are on screen and the next day's heading
+            // then takes its place, rather than headings piling up.
+            SliverMainAxisGroup(
+              slivers: [
+                SliverPersistentHeader(
+                  pinned: true,
+                  delegate: AlbumDayHeaderDelegate(
+                    section,
+                    height: headerHeight,
                   ),
                 ),
-                for (final section in _sections) ...[
-                  SliverToBoxAdapter(child: _DayHeader(section: section)),
-                  SliverPadding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    sliver: SliverGrid.builder(
-                      gridDelegate:
-                          const SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: 3,
-                        mainAxisSpacing: 4,
-                        crossAxisSpacing: 4,
-                      ),
-                      itemCount: section.photos.length,
-                      itemBuilder: (context, index) {
-                        final photo = section.photos[index];
-                        return _PhotoTile(
-                          key: ValueKey(photo.id),
-                          photo: photo,
-                          selecting: selecting,
-                          selected: _selected.contains(photo.id),
-                          onTap: selecting
-                              ? () => _toggle(photo)
-                              : () => _openPreview(flatPhotos, photo),
-                          onLongPress: () => _toggle(photo),
-                        );
-                      },
-                    ),
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(10, 2, 10, 8),
+                  sliver: SliverGrid.builder(
+                    // Tiles stay about the same size and the number of
+                    // columns follows the width: three on a phone, many
+                    // more on a desktop window, rather than three huge
+                    // tiles.
+                    gridDelegate:
+                        const SliverGridDelegateWithMaxCrossAxisExtent(
+                          maxCrossAxisExtent: albumTileMaxExtent,
+                          mainAxisSpacing: 4,
+                          crossAxisSpacing: 4,
+                        ),
+                    itemCount: section.photos.length,
+                    itemBuilder: (context, index) {
+                      final photo = section.photos[index];
+                      return AlbumPhotoTile(
+                        key: ValueKey(photo.id),
+                        library: widget.library,
+                        photo: photo,
+                        selecting: selecting,
+                        selected: _selected.contains(photo.id),
+                        onTap: selecting
+                            ? () => _toggle(photo)
+                            : () => _openPreview(flatPhotos, photo),
+                        onToggle: () => _toggle(photo),
+                      );
+                    },
                   ),
-                ],
-                const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                ),
               ],
             ),
-        },
+          const SliverToBoxAdapter(child: SizedBox(height: 24)),
+        ],
       ),
-    );
+    };
   }
 
   Widget _centered(Widget child) {
@@ -354,193 +755,30 @@ class ImageAlbumState extends State<ImageAlbum> {
 Future<bool> _defaultConfirm(BuildContext context, int count) async {
   final confirmed = await showDialog<bool>(
     context: context,
-    builder: (context) => AlertDialog(
-      title: Text(count == 1 ? 'Delete 1 photo?' : 'Delete $count photos?'),
-      content: const Text('This deletes the selected files from this folder.'),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(false),
-          child: const Text('Cancel'),
+    builder: (context) {
+      final scheme = Theme.of(context).colorScheme;
+      return AlertDialog(
+        icon: Icon(Icons.delete_outline_rounded, color: scheme.error),
+        title: Text(count == 1 ? 'Delete 1 photo?' : 'Delete $count photos?'),
+        content: const Text(
+          'This deletes the selected files from this folder.',
         ),
-        FilledButton(
-          onPressed: () => Navigator.of(context).pop(true),
-          child: const Text('Delete'),
-        ),
-      ],
-    ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: scheme.error,
+              foregroundColor: scheme.onError,
+            ),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      );
+    },
   );
   return confirmed ?? false;
-}
-
-class _DayHeader extends StatelessWidget {
-  const _DayHeader({required this.section});
-
-  final AlbumDaySection section;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 8, 8),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(_dayLabel(section.day), style: theme.textTheme.titleSmall),
-          ),
-          Text(
-            '${section.photos.length}',
-            style: theme.textTheme.bodySmall?.copyWith(color: theme.hintColor),
-          ),
-        ],
-      ),
-    );
-  }
-
-  static String _dayLabel(DateTime day) {
-    final today = DateTime.now();
-    final startOfToday = DateTime(today.year, today.month, today.day);
-    final difference = startOfToday.difference(day).inDays;
-    if (difference == 0) return 'Today';
-    if (difference == 1) return 'Yesterday';
-    final month = day.month.toString().padLeft(2, '0');
-    final dayOfMonth = day.day.toString().padLeft(2, '0');
-    return '${day.year}-$month-$dayOfMonth';
-  }
-}
-
-class _PhotoTile extends StatelessWidget {
-  const _PhotoTile({
-    super.key,
-    required this.photo,
-    required this.selecting,
-    required this.selected,
-    required this.onTap,
-    required this.onLongPress,
-  });
-
-  final AlbumPhoto photo;
-
-  /// Whether the album is in selection mode — every tile then shows its
-  /// check marker, not just the selected ones, so the mode is visible.
-  final bool selecting;
-
-  final bool selected;
-  final VoidCallback onTap;
-  final VoidCallback onLongPress;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return GestureDetector(
-      onTap: onTap,
-      onLongPress: onLongPress,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          ColoredBox(
-            color: theme.colorScheme.surfaceContainerHighest,
-            child: Image.file(
-              photo.file,
-              fit: BoxFit.cover,
-              gaplessPlayback: true,
-              // Decoded at roughly tile resolution rather than full size, so a
-              // grid of full-resolution photos does not each cost a full decode
-              // just to show a thumbnail.
-              cacheWidth: 240,
-              errorBuilder: (_, _, _) =>
-                  const Icon(Icons.broken_image_outlined),
-            ),
-          ),
-          if (selected)
-            DecoratedBox(
-              decoration: BoxDecoration(
-                color: theme.colorScheme.primary.withValues(alpha: 0.25),
-                border: Border.all(color: theme.colorScheme.primary, width: 2),
-              ),
-            ),
-          if (selecting)
-            Positioned(
-              top: 4,
-              right: 4,
-              child: Icon(
-                selected ? Icons.check_circle : Icons.circle_outlined,
-                size: 20,
-                color: selected ? theme.colorScheme.primary : Colors.white70,
-                shadows: const [Shadow(blurRadius: 4, color: Colors.black54)],
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _DefaultEmpty extends StatelessWidget {
-  const _DefaultEmpty();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.all(32),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            Icons.photo_library_outlined,
-            size: 56,
-            color: theme.disabledColor,
-          ),
-          const SizedBox(height: 16),
-          Text('No photos', style: theme.textTheme.titleMedium),
-          const SizedBox(height: 8),
-          Text(
-            'Nothing in this folder yet.',
-            textAlign: TextAlign.center,
-            style: theme.textTheme.bodyMedium?.copyWith(color: theme.hintColor),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ErrorBody extends StatelessWidget {
-  const _ErrorBody({required this.message, required this.onRetry});
-
-  final String message;
-  final Future<void> Function() onRetry;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(32),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            Icons.error_outline,
-            size: 56,
-            color: Theme.of(context).colorScheme.error,
-          ),
-          const SizedBox(height: 16),
-          const Text('Could not load the album', textAlign: TextAlign.center),
-          const SizedBox(height: 8),
-          Text(
-            message,
-            textAlign: TextAlign.center,
-            style: Theme.of(context)
-                .textTheme
-                .bodySmall
-                ?.copyWith(color: Theme.of(context).hintColor),
-          ),
-          const SizedBox(height: 20),
-          OutlinedButton(
-            onPressed: onRetry,
-            child: const Text('Retry'),
-          ),
-        ],
-      ),
-    );
-  }
 }

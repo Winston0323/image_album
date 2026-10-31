@@ -32,24 +32,33 @@ void main() {
   });
 
   tearDown(() async {
-    if (await temp.exists()) await temp.delete(recursive: true);
+    // Thumbnails may still be reading the photos when a test ends, so deleting
+    // the folder is retried briefly.
+    for (var attempt = 0; attempt < 40; attempt++) {
+      try {
+        if (await temp.exists()) await temp.delete(recursive: true);
+        return;
+      } on FileSystemException {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+    }
   });
 
   Future<void> writePhoto(
     WidgetTester tester,
     String name, {
     required DateTime modifiedAt,
-  }) =>
-      tester.runAsync(() async {
-        final file = File('${temp.path}/$name');
-        await file.writeAsBytes(_onePixelPng);
-        await file.setLastModified(modifiedAt);
-      });
+  }) => tester.runAsync(() async {
+    final file = File('${temp.path}/$name');
+    await file.writeAsBytes(_onePixelPng);
+    await file.setLastModified(modifiedAt);
+  });
 
   Widget app() => MaterialApp(home: ImageAlbum(path: temp.path));
 
-  testWidgets('shows an empty state when the folder has no images',
-      (tester) async {
+  testWidgets('shows an empty state when the folder has no images', (
+    tester,
+  ) async {
     await tester.pumpWidget(app());
     await _settle(tester);
 
@@ -76,8 +85,52 @@ void main() {
     expect(todayY, lessThan(yesterdayY));
   });
 
-  testWidgets('tapping a photo opens the full-screen swipe preview',
-      (tester) async {
+  group('grid columns', () {
+    /// Number of tiles sharing the first row, and the width of one tile.
+    Future<(int, double)> firstRow(WidgetTester tester, double width) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = Size(width, 900);
+      addTearDown(tester.view.reset);
+
+      for (var i = 0; i < 40; i++) {
+        await writePhoto(
+          tester,
+          'P${i.toString().padLeft(2, '0')}.JPG',
+          modifiedAt: DateTime.now().subtract(Duration(minutes: i)),
+        );
+      }
+      await tester.pumpWidget(app());
+      await _settle(tester);
+
+      final tiles = find.byType(Image);
+      final top = tester.getTopLeft(tiles.first).dy;
+      final row = [
+        for (final tile in tiles.evaluate())
+          if (tester.getTopLeft(find.byWidget(tile.widget)).dy == top) tile,
+      ];
+      return (row.length, tester.getSize(tiles.first).width);
+    }
+
+    testWidgets('a phone-width window shows three columns', (tester) async {
+      final (columns, tileWidth) = await firstRow(tester, 400);
+
+      expect(columns, 3);
+      expect(tileWidth, lessThan(albumTileMaxExtent * 1.05));
+    });
+
+    testWidgets('a desktop-width window adds columns, not bigger tiles', (
+      tester,
+    ) async {
+      final (columns, tileWidth) = await firstRow(tester, 1600);
+
+      expect(columns, greaterThanOrEqualTo(10));
+      expect(tileWidth, lessThan(albumTileMaxExtent * 1.05));
+    });
+  });
+
+  testWidgets('tapping a photo opens the full-screen swipe preview', (
+    tester,
+  ) async {
     await writePhoto(tester, 'A.JPG', modifiedAt: DateTime.now());
 
     await tester.pumpWidget(app());
@@ -90,8 +143,9 @@ void main() {
     expect(find.text('A.JPG'), findsOneWidget);
   });
 
-  testWidgets('the preview info button shows the photo details',
-      (tester) async {
+  testWidgets('the preview info button shows the photo details', (
+    tester,
+  ) async {
     await writePhoto(tester, 'A.JPG', modifiedAt: DateTime(2026, 7, 30, 12));
 
     await tester.pumpWidget(app());
@@ -113,8 +167,9 @@ void main() {
     expect(find.text('Focal length'), findsNothing);
   });
 
-  testWidgets('long-press selects, and delete removes the file',
-      (tester) async {
+  testWidgets('long-press selects, and delete removes the file', (
+    tester,
+  ) async {
     await writePhoto(tester, 'A.JPG', modifiedAt: DateTime.now());
 
     await tester.pumpWidget(app());

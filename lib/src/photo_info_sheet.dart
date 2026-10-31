@@ -140,26 +140,50 @@ class _PhotoInfoSheetState extends State<_PhotoInfoSheet> {
               children: [
                 Text(
                   info.fileName,
-                  style: Theme.of(context).textTheme.titleMedium,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
                 ),
-                const SizedBox(height: 12),
-                _InfoRow(label: 'Size', value: _formatBytes(info.byteSize)),
+                const SizedBox(height: 14),
+                _InfoRow(
+                  icon: Icons.sd_storage_outlined,
+                  label: 'Size',
+                  value: _formatBytes(info.byteSize),
+                ),
                 if (info.width != null && info.height != null)
                   _InfoRow(
+                    icon: Icons.aspect_ratio_rounded,
                     label: 'Dimensions',
-                    value: '${info.width} × ${info.height}'
+                    value:
+                        '${info.width} × ${info.height}'
                         ' (${_megapixels(info.width!, info.height!)} MP)',
                   ),
                 if (info.shotDate != null)
                   _InfoRow(
+                    icon: Icons.calendar_today_outlined,
                     label: 'Shot date',
                     value: _formatDate(info.shotDate!),
                   ),
                 if (info.focalLength != null)
-                  _InfoRow(label: 'Focal length', value: info.focalLength!),
+                  _InfoRow(
+                    icon: Icons.center_focus_strong_outlined,
+                    label: 'Focal length',
+                    value: info.focalLength!,
+                  ),
                 if (info.lensModel case final lens? when lens.isNotEmpty)
-                  _InfoRow(label: 'Lens', value: lens),
-                _InfoRow(label: 'Path', value: info.path, selectable: true),
+                  _InfoRow(
+                    icon: Icons.camera_outlined,
+                    label: 'Lens',
+                    value: lens,
+                  ),
+                _InfoRow(
+                  icon: Icons.folder_outlined,
+                  label: 'Path',
+                  value: info.path,
+                  selectable: true,
+                ),
               ],
             ),
           ),
@@ -186,11 +210,13 @@ class _PhotoInfoSheetState extends State<_PhotoInfoSheet> {
 
 class _InfoRow extends StatelessWidget {
   const _InfoRow({
+    required this.icon,
     required this.label,
     required this.value,
     this.selectable = false,
   });
 
+  final IconData icon;
   final String label;
   final String value;
 
@@ -200,23 +226,39 @@ class _InfoRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final valueStyle = theme.textTheme.bodyMedium;
+    final scheme = theme.colorScheme;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(
-            width: 100,
-            child: Text(
-              label,
-              style: theme.textTheme.bodyMedium?.copyWith(color: theme.hintColor),
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: Icon(icon, size: 18, color: scheme.onSurfaceVariant),
             ),
           ),
+          const SizedBox(width: 14),
           Expanded(
-            child: selectable
-                ? SelectableText(value, style: valueStyle)
-                : Text(value, style: valueStyle),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 1),
+                selectable
+                    ? SelectableText(value, style: theme.textTheme.bodyMedium)
+                    : Text(value, style: theme.textTheme.bodyMedium),
+              ],
+            ),
           ),
         ],
       ),

@@ -41,7 +41,7 @@ dependencies:
   permission_handler: ^13.0.2
   android_file_picker: ^2.1.1
   windows_file_picker: ^2.0.1
-
+  path_provider: ^2.1.6
 dev_dependencies:
   flutter_test:
     sdk: flutter
