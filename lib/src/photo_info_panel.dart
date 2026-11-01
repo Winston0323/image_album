@@ -5,6 +5,7 @@ import 'package:exif/exif.dart';
 import 'package:flutter/material.dart';
 
 import 'album_photo.dart';
+import 'album_raw.dart';
 
 /// Everything the info panel shows about one local photo, gathered from the
 /// file itself: size on disk, pixel dimensions from the image header, and
@@ -41,15 +42,24 @@ Future<PhotoInfo> loadPhotoInfo(AlbumPhoto photo) async {
   // decode of a large frame just to print its pixel size.
   int? width;
   int? height;
-  try {
-    final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
-    final descriptor = await ui.ImageDescriptor.encoded(buffer);
-    width = descriptor.width;
-    height = descriptor.height;
-    descriptor.dispose();
-    buffer.dispose();
-  } catch (_) {
-    // Not decodable — the panel simply shows no dimensions.
+  if (albumNeedsConversion(photo.file.path)) {
+    // Flutter cannot read these. The TIFF structure names the size of the
+    // picture itself, which for a camera raw is the sensor's, not the
+    // preview's.
+    final size = await albumTiffSize(photo.file);
+    width = size?.width;
+    height = size?.height;
+  } else {
+    try {
+      final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+      final descriptor = await ui.ImageDescriptor.encoded(buffer);
+      width = descriptor.width;
+      height = descriptor.height;
+      descriptor.dispose();
+      buffer.dispose();
+    } catch (_) {
+      // Not decodable — the panel simply shows no dimensions.
+    }
   }
 
   Map<String, IfdTag> tags = const {};

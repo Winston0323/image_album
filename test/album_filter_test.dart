@@ -74,31 +74,70 @@ void main() {
   int tiles(WidgetTester tester) =>
       find.byType(AlbumPhotoTile).evaluate().length;
 
-  Future<void> tapChip(WidgetTester tester, String label) async {
-    await tester.tap(find.widgetWithText(FilterChip, label));
-    await _settle(tester);
+  final dropdown = find.byKey(const ValueKey('albumTypeFilter'));
+
+  /// The text on the drop-down button: what is shown now.
+  String current(WidgetTester tester) => tester
+      .widget<Text>(
+        find.descendant(of: dropdown, matching: find.byType(Text)).first,
+      )
+      .data!;
+
+  Future<void> openMenu(WidgetTester tester) async {
+    await tester.tap(dropdown);
+    await tester.pumpAndSettle();
   }
 
-  testWidgets('a mixed folder gets a chip per type, with counts', (
+  /// The menu entry of a type, ticking or unticking it.
+  Future<void> tapChip(WidgetTester tester, String label) async {
+    if (find.byType(CheckboxMenuButton).evaluate().isEmpty) {
+      await openMenu(tester);
+    }
+    await tester.tap(find.widgetWithText(CheckboxMenuButton, label));
+    await _settle(tester);
+    await tester.pumpAndSettle();
+  }
+
+  bool ticked(WidgetTester tester, String label) => tester
+      .widget<CheckboxMenuButton>(
+        find.widgetWithText(CheckboxMenuButton, label),
+      )
+      .value!;
+
+  testWidgets('a mixed folder gets one drop-down, with a count per type', (
     tester,
   ) async {
     await write(tester, ['a.jpg', 'b.JPEG', 'c.png', 'd.gif']);
     await open(tester);
 
-    expect(find.widgetWithText(ChoiceChip, 'All'), findsOneWidget);
-    expect(find.widgetWithText(FilterChip, 'GIF · 1'), findsOneWidget);
-    expect(find.widgetWithText(FilterChip, 'JPG · 2'), findsOneWidget);
-    expect(find.widgetWithText(FilterChip, 'PNG · 1'), findsOneWidget);
+    expect(dropdown, findsOneWidget);
+    expect(current(tester), 'All types · 4');
+    // No row of chips any more.
+    expect(find.byType(FilterChip), findsNothing);
+    expect(find.byType(ChoiceChip), findsNothing);
+
+    await openMenu(tester);
+    expect(find.widgetWithText(CheckboxMenuButton, 'All types · 4'), findsOne);
+    expect(find.widgetWithText(CheckboxMenuButton, 'GIF · 1'), findsOneWidget);
+    expect(find.widgetWithText(CheckboxMenuButton, 'JPG · 2'), findsOneWidget);
+    expect(find.widgetWithText(CheckboxMenuButton, 'PNG · 1'), findsOneWidget);
     expect(tiles(tester), 4);
   });
 
-  testWidgets('a folder of one type has no filter bar', (tester) async {
+  testWidgets('a folder of one type shows that type in the drop-down', (
+    tester,
+  ) async {
     await write(tester, ['a.jpg', 'b.jpeg']);
     await open(tester);
 
-    expect(find.byType(FilterChip), findsNothing);
-    expect(find.byType(ChoiceChip), findsNothing);
+    expect(dropdown, findsOneWidget);
+    expect(current(tester), 'JPG · 2');
     expect(tiles(tester), 2);
+
+    // Its menu lists just that type.
+    await openMenu(tester);
+    expect(find.widgetWithText(CheckboxMenuButton, 'JPG · 2'), findsOneWidget);
+    expect(find.byType(CheckboxMenuButton), findsNWidgets(2));
   });
 
   testWidgets('picking a type shows only that type', (tester) async {
@@ -137,10 +176,31 @@ void main() {
     await tapChip(tester, 'PNG · 1');
     expect(tiles(tester), 1);
 
-    await tester.tap(find.widgetWithText(ChoiceChip, 'All'));
+    expect(current(tester), 'PNG · 1');
+    await tester.tap(find.widgetWithText(CheckboxMenuButton, 'All types · 3'));
     await _settle(tester);
+    await tester.pumpAndSettle();
     expect(tiles(tester), 3);
     expect(reported.last, isEmpty);
+    expect(current(tester), 'All types · 3');
+    // Choosing it closes the menu.
+    expect(find.byType(CheckboxMenuButton), findsNothing);
+  });
+
+  testWidgets('the drop-down names every type picked', (tester) async {
+    await write(tester, ['a.jpg', 'b.jpeg', 'c.png', 'd.gif']);
+    await open(tester);
+
+    await tapChip(tester, 'JPG · 2');
+    expect(current(tester), 'JPG · 2');
+    await tapChip(tester, 'PNG · 1');
+    expect(current(tester), 'JPG, PNG · 3');
+
+    // The menu stayed open between the two picks, and shows what is ticked.
+    expect(ticked(tester, 'JPG · 2'), isTrue);
+    expect(ticked(tester, 'PNG · 1'), isTrue);
+    expect(ticked(tester, 'GIF · 1'), isFalse);
+    expect(ticked(tester, 'All types · 4'), isFalse);
   });
 
   testWidgets('the filter the album opens with is applied', (tester) async {
@@ -148,12 +208,9 @@ void main() {
     await open(tester, initial: {'png'});
 
     expect(tiles(tester), 1);
-    expect(
-      tester
-          .widget<FilterChip>(find.widgetWithText(FilterChip, 'PNG · 1'))
-          .selected,
-      isTrue,
-    );
+    expect(current(tester), 'PNG · 1');
+    await openMenu(tester);
+    expect(ticked(tester, 'PNG · 1'), isTrue);
   });
 
   testWidgets('a type with no photos says so and offers a way out', (

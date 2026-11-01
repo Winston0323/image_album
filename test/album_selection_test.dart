@@ -308,4 +308,18 @@ void main() {
       expect(scrollable.position.pixels, before);
     });
   });
+
+  testWidgets('the day heading selects that day, and again clears it', (
+    tester,
+  ) async {
+    await openAlbum(tester);
+
+    await tester.tap(find.text('Jul 30'));
+    await tester.pump();
+    expect(selectedCount(12), findsOneWidget);
+
+    await tester.tap(find.text('Jul 30'));
+    await tester.pump();
+    expect(find.textContaining('selected'), findsNothing);
+  });
 }

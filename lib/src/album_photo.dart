@@ -6,6 +6,8 @@ import 'package:exif/exif.dart';
 import 'package:path/path.dart' as p;
 
 import 'album_cache.dart';
+import 'album_catalog.dart';
+import 'album_raw.dart';
 
 /// Extensions [loadAlbumPhotos] treats as images. Compared case-insensitively,
 /// so `DSC0001.JPG` and `photo.png` both qualify.
@@ -18,6 +20,12 @@ const Set<String> albumImageExtensions = {
   '.bmp',
   '.heic',
   '.heif',
+  // Not drawn by Flutter itself: the album shows a TIFF as decoded, and the
+  // camera's own preview for a raw. See album_raw.dart.
+  '.tif',
+  '.tiff',
+  '.fff',
+  '.arw',
 };
 
 /// One image file found under an album directory.
@@ -46,6 +54,7 @@ String albumFileType(String path) {
   return switch (extension) {
     '.jpg' || '.jpeg' => 'JPG',
     '.heic' || '.heif' => 'HEIC',
+    '.tif' || '.tiff' => 'TIFF',
     '' => '',
     _ => extension.substring(1).toUpperCase(),
   };
@@ -114,12 +123,27 @@ List<AlbumPhoto> _sortedNewestFirst(List<AlbumPhoto> photos) {
 /// Dates are remembered in [cacheDirectory] (default: a folder in the system
 /// temp directory), keyed by each file's size and modification time, so
 /// opening the same folder again does not re-read the image files.
+///
+/// With [useCatalog] the same index is also kept in a hidden catalog file,
+/// [albumCatalogName], inside [path]. It travels with the folder, so a folder
+/// that was indexed once is quick to open even from a new install or another
+/// machine, and it covers the whole tree whichever way the folder was scanned.
+/// When the folder cannot be written to, the album carries on without it.
+///
+/// A scan normally checks every file's size and modification time against the
+/// catalog, which costs a stat per file. Give [trustCatalog] a duration and a
+/// catalog that was verified more recently than that is believed instead:
+/// files it lists are not checked again, and only files that were added or
+/// removed show up. A photo edited in place, under the same name, is picked up
+/// once the catalog is older than [trustCatalog] or when it is not given.
 Future<List<AlbumPhoto>> loadAlbumPhotos(
   String path, {
   bool recursive = false,
   void Function(List<AlbumPhoto> photos)? onProgress,
   AlbumLoadToken? token,
   Directory? cacheDirectory,
+  bool useCatalog = true,
+  Duration? trustCatalog,
 }) async {
   final cachePath = (cacheDirectory ?? albumCacheRoot()).path;
   final port = ReceivePort();
@@ -127,6 +151,8 @@ Future<List<AlbumPhoto>> loadAlbumPhotos(
     path,
     recursive,
     cachePath,
+    useCatalog,
+    trustCatalog?.inMicroseconds ?? 0,
     port.sendPort,
   ), debugName: 'image_album_scan');
   token?._attach(isolate);
@@ -195,11 +221,28 @@ List<AlbumPhoto> mergeAlbumPhotos(Iterable<List<AlbumPhoto>> lists) {
 /// the folder again. It can be out of date: files may have been added, moved
 /// or deleted since. Empty when the folder has no index yet. Reading runs on a
 /// background isolate.
+///
+/// The folder's own catalog is read first, when [useCatalog] is set and it
+/// covers what is asked for: a recursive read needs a catalog made by a
+/// recursive scan. Otherwise the index in [cacheDirectory] is used.
 Future<List<AlbumPhoto>> readAlbumIndex(
   String path, {
   bool recursive = false,
   Directory? cacheDirectory,
+  bool useCatalog = true,
 }) async {
+  if (useCatalog) {
+    final rows = await Isolate.run(() => _readCatalogRows(path, recursive));
+    if (rows != null) {
+      return [
+        for (var i = 0; i + 1 < rows.length; i += 2)
+          AlbumPhoto(
+            file: File(rows[i] as String),
+            takenAt: DateTime.fromMicrosecondsSinceEpoch(rows[i + 1] as int),
+          ),
+      ];
+    }
+  }
   final file = File(
     p.join(
       (cacheDirectory ?? albumCacheRoot()).path,
@@ -228,6 +271,25 @@ Future<List<Object>> _readIndexRows(String path) async {
     });
   return [
     for (final entry in entries) ...[entry.key, entry.value.takenAt],
+  ];
+}
+
+/// What the catalog in [path] lists for a scan of [recursive] kind, as
+/// `[path, microseconds, ...]` newest first, or null when it has nothing
+/// usable to say: no catalog, or a shallow one when the whole tree is wanted.
+Future<List<Object>?> _readCatalogRows(String path, bool recursive) async {
+  final catalog = await readAlbumCatalog(path);
+  if (catalog == null || (recursive && !catalog.deep)) return null;
+  final rows =
+      [
+        for (final entry in catalog.inScope(recursive))
+          (albumCatalogPath(path, entry.key), entry.value.takenAt),
+      ]..sort((a, b) {
+        final byDate = b.$2.compareTo(a.$2);
+        return byDate != 0 ? byDate : a.$1.compareTo(b.$1);
+      });
+  return [
+    for (final row in rows) ...[row.$1, row.$2],
   ];
 }
 
@@ -289,8 +351,10 @@ const int _headBytes = 128 * 1024;
 /// Entry point for the scan isolate. Messages are lists:
 /// `['batch', path, microseconds, ...]`, `['done']`, `['error', message]`,
 /// or `['exit']` when the isolate is killed.
-Future<void> _scanAlbum((String, bool, String, SendPort) message) async {
-  final (path, recursive, cachePath, send) = message;
+Future<void> _scanAlbum(
+  (String, bool, String, bool, int, SendPort) message,
+) async {
+  final (path, recursive, cachePath, useCatalog, trustMicros, send) = message;
   try {
     final dir = Directory(path);
     if (!await dir.exists()) {
@@ -299,9 +363,35 @@ Future<void> _scanAlbum((String, bool, String, SendPort) message) async {
     }
 
     final cacheFile = File(p.join(cachePath, albumIndexName(path, recursive)));
-    final known = await _readDateCache(cacheFile);
+    final catalog = useCatalog ? await readAlbumCatalog(path) : null;
+
+    // What is already known about the files, by absolute path. The folder's
+    // own catalog comes first; the album file's index is the fallback.
+    final Map<String, _DateEntry> known;
+    // How many of those entries a scan of this kind is expected to meet again.
+    final int expected;
+    if (catalog != null) {
+      known = {
+        for (final entry in catalog.entries.entries)
+          albumCatalogPath(path, entry.key): entry.value,
+      };
+      expected = catalog.inScope(recursive).length;
+    } else {
+      known = await _readDateCache(cacheFile);
+      expected = known.length;
+    }
+
+    // A recent enough catalog is believed: its files are not stat'ed again.
+    final now = DateTime.now().microsecondsSinceEpoch;
+    final trusted =
+        catalog != null &&
+        trustMicros > 0 &&
+        now >= catalog.verifiedAt &&
+        now - catalog.verifiedAt < trustMicros;
+
     final seen = <String, _DateEntry>{};
     var misses = 0;
+    var hits = 0;
 
     final clock = Stopwatch()..start();
     var lastFlush = 0;
@@ -318,26 +408,39 @@ Future<void> _scanAlbum((String, bool, String, SendPort) message) async {
 
     Future<void> process(File file) async {
       try {
-        final stat = await file.stat();
-        if (stat.type != FileSystemEntityType.file) return;
-        final modified = stat.modified.microsecondsSinceEpoch;
         final cached = known[file.path];
+        if (cached != null) hits++;
 
-        int takenAt;
-        if (cached != null &&
-            cached.size == stat.size &&
-            cached.modified == modified) {
-          takenAt = cached.takenAt;
+        if (trusted && cached != null) {
+          // Listed, so it was here when the catalog was last verified.
+          seen[file.path] = cached;
+          ready
+            ..add(file.path)
+            ..add(cached.takenAt);
         } else {
-          misses++;
-          final date = await _captureDate(file, stat.size) ?? stat.modified;
-          takenAt = date.microsecondsSinceEpoch;
-        }
+          final stat = await file.stat();
+          if (stat.type != FileSystemEntityType.file) {
+            if (cached != null) hits--;
+            return;
+          }
+          final modified = stat.modified.microsecondsSinceEpoch;
 
-        seen[file.path] = _DateEntry(stat.size, modified, takenAt);
-        ready
-          ..add(file.path)
-          ..add(takenAt);
+          int takenAt;
+          if (cached != null &&
+              cached.size == stat.size &&
+              cached.modified == modified) {
+            takenAt = cached.takenAt;
+          } else {
+            misses++;
+            final date = await _captureDate(file, stat.size) ?? stat.modified;
+            takenAt = date.microsecondsSinceEpoch;
+          }
+
+          seen[file.path] = _DateEntry(stat.size, modified, takenAt);
+          ready
+            ..add(file.path)
+            ..add(takenAt);
+        }
         if (ready.length ~/ 2 >= _flushCount ||
             clock.elapsedMilliseconds - lastFlush >= _flushMillis) {
           flush();
@@ -364,8 +467,34 @@ Future<void> _scanAlbum((String, bool, String, SendPort) message) async {
     await Future.wait(active.toList());
     flush();
 
-    if (misses > 0 || seen.length != known.length) {
+    // Something changed when a file is new or was read again, or when one the
+    // index listed is gone.
+    final changed = misses > 0 || hits != expected;
+    if (changed || !await cacheFile.exists()) {
       await _writeDateCache(cacheFile, seen);
+    }
+    if (useCatalog &&
+        (catalog == null || changed || (trustMicros > 0 && !trusted))) {
+      final entries = <String, AlbumCatalogEntry>{};
+      // A scan of the folder alone has not seen what is below it. Keep what
+      // an earlier, deeper scan found there.
+      if (!recursive && catalog != null) {
+        for (final entry in catalog.entries.entries) {
+          if (entry.key.contains('/')) entries[entry.key] = entry.value;
+        }
+      }
+      seen.forEach((file, entry) {
+        entries[albumCatalogKey(path, file)] = entry;
+      });
+      await writeAlbumCatalog(
+        path,
+        AlbumCatalog(
+          // Trusting the catalog verified nothing, so its age stands.
+          verifiedAt: trusted ? catalog.verifiedAt : now,
+          deep: recursive || (catalog?.deep ?? false),
+          entries: entries,
+        ),
+      );
     }
     send.send(const ['done']);
   } catch (error) {
@@ -384,6 +513,10 @@ Future<DateTime?> _captureDate(File file, int size) async {
   final extension = p.extension(file.path).toLowerCase();
   // Neither format carries EXIF.
   if (extension == '.gif' || extension == '.bmp') return null;
+
+  // TIFF and the raws built on it can be huge, and the whole-file reader
+  // below would load every one of them to find a line of text.
+  if (albumNeedsConversion(file.path)) return albumTiffCaptureDate(file);
 
   if (extension == '.jpg' || extension == '.jpeg') {
     try {
@@ -436,13 +569,7 @@ DateTime? _exifDate(IfdTag? tag) {
 
 /// What the date cache remembers about one file. [takenAt] is the date the
 /// album uses, in microseconds since the epoch.
-class _DateEntry {
-  const _DateEntry(this.size, this.modified, this.takenAt);
-
-  final int size;
-  final int modified;
-  final int takenAt;
-}
+typedef _DateEntry = AlbumCatalogEntry;
 
 /// Reads `path<TAB>size<TAB>modified<TAB>takenAt` lines. A missing or damaged
 /// cache is just an empty one.

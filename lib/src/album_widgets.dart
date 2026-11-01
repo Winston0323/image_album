@@ -85,9 +85,21 @@ String albumFormatCount(int count) {
 /// Day heading that stays at the top of the screen while its photos scroll
 /// beneath it, and hands over to the next day's heading when that arrives.
 class AlbumDayHeaderDelegate extends SliverPersistentHeaderDelegate {
-  const AlbumDayHeaderDelegate(this.section, {this.height = baseHeight});
+  const AlbumDayHeaderDelegate(
+    this.section, {
+    this.height = baseHeight,
+    this.selected,
+    this.onSelect,
+  });
 
   final AlbumDaySection section;
+
+  /// Whether this day's photos are picked: all of them, none, or some.
+  /// Shown only when [onSelect] is set.
+  final bool? selected;
+
+  /// Picks or clears every photo from this day.
+  final VoidCallback? onSelect;
 
   /// Height of the heading at the default text size.
   static const double baseHeight = 48;
@@ -113,7 +125,10 @@ class AlbumDayHeaderDelegate extends SliverPersistentHeaderDelegate {
 
   @override
   bool shouldRebuild(AlbumDayHeaderDelegate oldDelegate) =>
-      oldDelegate.section != section || oldDelegate.height != height;
+      oldDelegate.section != section ||
+      oldDelegate.height != height ||
+      oldDelegate.selected != selected ||
+      oldDelegate.onSelect != onSelect;
 
   @override
   Widget build(
@@ -140,65 +155,87 @@ class AlbumDayHeaderDelegate extends SliverPersistentHeaderDelegate {
     ({String title, String subtitle}) labels,
     bool overlapsContent,
   ) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        // Opaque: the next day's heading slides over this one.
-        color: scheme.surface,
-        border: Border(
-          bottom: BorderSide(
-            color: scheme.outlineVariant.withValues(
-              alpha: overlapsContent ? 0.6 : 0,
+    final select = onSelect;
+    // Opaque: the next day's heading slides over this one.
+    return Material(
+      color: scheme.surface,
+      child: GestureDetector(
+        onTap: select,
+        behavior: HitTestBehavior.opaque,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            border: Border(
+              bottom: BorderSide(
+                color: scheme.outlineVariant.withValues(
+                  alpha: overlapsContent ? 0.6 : 0,
+                ),
+              ),
             ),
           ),
-        ),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 6, 12, 0),
-        // Centered in the header; a baseline-aligned Row alone sits at the top.
-        child: Align(
-          alignment: Alignment.centerLeft,
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.baseline,
-            textBaseline: TextBaseline.alphabetic,
-            children: [
-              Text(
-                labels.title,
-                style: theme.textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: -0.2,
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  labels.subtitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: scheme.onSurfaceVariant,
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(select == null ? 16 : 4, 0, 12, 0),
+            child: Row(
+              children: [
+                if (select != null)
+                  IgnorePointer(
+                    child: Checkbox(
+                      value: selected,
+                      tristate: true,
+                      visualDensity: VisualDensity.compact,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      onChanged: (_) {},
+                    ),
                   ),
-                ),
-              ),
-              DecoratedBox(
-                decoration: BoxDecoration(
-                  color: scheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 2,
-                  ),
-                  child: Text(
-                    albumFormatCount(section.photos.length),
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: scheme.onSurfaceVariant,
-                      fontWeight: FontWeight.w600,
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        Text(
+                          labels.title,
+                          style: theme.textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: -0.2,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            labels.subtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              color: scheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                        DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: scheme.surfaceContainerHighest,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 2,
+                            ),
+                            child: Text(
+                              albumFormatCount(section.photos.length),
+                              style: theme.textTheme.labelMedium?.copyWith(
+                                color: scheme.onSurfaceVariant,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),

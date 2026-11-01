@@ -10,6 +10,7 @@ import 'package:path/path.dart' as p;
 
 import 'album_cache.dart';
 import 'album_library.dart';
+import 'album_raw.dart';
 
 /// Width, in pixels, photos are decoded at for grid tiles.
 const int albumThumbnailWidth = 240;
@@ -46,11 +47,70 @@ ImageProvider albumThumbnailProvider(File file, {AlbumLibrary? library}) {
 /// Decoding a 24 MP photo at full size costs roughly 96 MB and a few hundred
 /// milliseconds, only to draw it into a screen that has a tenth of the pixels.
 ImageProvider albumFittedProvider(File file, Size box) => ResizeImage(
-  FileImage(file),
+  albumNeedsConversion(file.path)
+      ? AlbumConvertedImage(
+          file,
+          maxSide: (box.width > box.height ? box.width : box.height).ceil(),
+        )
+      : FileImage(file),
   width: box.width.round(),
   height: box.height.round(),
   policy: ResizeImagePolicy.fit,
 );
+
+/// A TIFF or camera raw, turned into something Flutter can draw: the camera's
+/// own JPEG preview for a raw, the decoded picture for a TIFF. See
+/// [albumDecodableBytes]. Wrap it in a [ResizeImage] to decode it smaller.
+///
+/// [maxSide] caps the longer side of a decoded TIFF, so a huge scan is not
+/// brought back at full size to be drawn in a window.
+@immutable
+class AlbumConvertedImage extends ImageProvider<AlbumConvertedImage> {
+  const AlbumConvertedImage(this.file, {this.maxSide});
+
+  final File file;
+  final int? maxSide;
+
+  @override
+  Future<AlbumConvertedImage> obtainKey(ImageConfiguration configuration) =>
+      SynchronousFuture<AlbumConvertedImage>(this);
+
+  @override
+  ImageStreamCompleter loadImage(
+    AlbumConvertedImage key,
+    ImageDecoderCallback decode,
+  ) {
+    return MultiFrameImageStreamCompleter(
+      codec: _load(decode),
+      scale: 1.0,
+      debugLabel: file.path,
+    );
+  }
+
+  Future<ui.Codec> _load(ImageDecoderCallback decode) async {
+    final path = file.path;
+    final side = maxSide;
+    final bytes = await _conversionGate.run(
+      () => Isolate.run(() => albumDecodableBytes(path, maxSide: side)),
+    );
+    if (bytes == null) {
+      throw FileSystemException('Nothing to show in this file', path);
+    }
+    return _decodeBytes(bytes, decode);
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is AlbumConvertedImage &&
+      other.file.path == file.path &&
+      other.maxSide == maxSide;
+
+  @override
+  int get hashCode => Object.hash(file.path, maxSide);
+
+  @override
+  String toString() => 'AlbumConvertedImage("${file.path}", maxSide: $maxSide)';
+}
 
 /// A small copy of a photo, kept on disk so it is made only once.
 ///
@@ -127,11 +187,41 @@ class AlbumThumbnailProvider extends ImageProvider<AlbumThumbnailProvider> {
     return _decodeBytes(made, decode);
   }
 
+  /// The original's bytes, or for a TIFF or camera raw the bytes of something
+  /// Flutter can draw in its place.
+  Future<Uint8List> _sourceBytes() async {
+    final extension = p.extension(file.path).toLowerCase();
+    // A camera JPEG is many megabytes, and the card it lives on is slow to
+    // read through. The small picture the camera stored in the EXIF is enough
+    // for a tile, and it sits in the first part of the file.
+    if (extension == '.jpg' || extension == '.jpeg') {
+      final thumb = await albumJpegEmbeddedThumbnail(file);
+      if (thumb != null) return thumb;
+    }
+    // A raw's own preview sits at a known offset. Reading that, and not the
+    // rest of the file, lets the tile on screen appear while scrolling
+    // instead of after every file has been searched.
+    if (albumNeedsConversion(file.path)) {
+      final preview = await albumEmbeddedPreview(file);
+      if (preview != null) return preview;
+    }
+    if (!albumNeedsConversion(file.path)) return file.readAsBytes();
+    final path = file.path;
+    // A decoded TIFF is brought back no bigger than twice the thumbnail, which
+    // leaves the final shrinking to the engine.
+    final side = width * 2;
+    final bytes = await Isolate.run(
+      () => albumDecodableBytes(path, maxSide: side),
+    );
+    if (bytes == null) {
+      throw FileSystemException('Nothing to show in this file', path);
+    }
+    return bytes;
+  }
+
   /// Decodes the original at thumbnail size and compresses the result.
   Future<Uint8List> _makeThumbnail() async {
-    final source = await ui.ImmutableBuffer.fromUint8List(
-      await file.readAsBytes(),
-    );
+    final source = await ui.ImmutableBuffer.fromUint8List(await _sourceBytes());
     ui.Image? image;
     try {
       final descriptor = await ui.ImageDescriptor.encoded(source);
@@ -354,3 +444,7 @@ class _Gate {
 }
 
 final _thumbnailGate = _Gate(3);
+
+/// Conversions of TIFFs and raws for the preview. Each holds a whole decoded
+/// photo, so only a couple run at once.
+final _conversionGate = _Gate(2);

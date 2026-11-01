@@ -30,7 +30,7 @@ Future<String?> _pickWindowsFolder(BuildContext context) async {
       windowsOptions: const FilePickerWindowsOptions(lockParentWindow: false),
     );
     if (!context.mounted) return null;
-    return _usableFolder(context, path);
+    return await _usableFolder(context, path);
   } on Exception catch (error) {
     if (!context.mounted) return null;
     await _tell(context, 'Could not open the folder picker.\n$error');
@@ -51,7 +51,7 @@ Future<String?> _pickAndroidFolder(BuildContext context) async {
       androidOptions: const AndroidOptions(),
     );
     if (!context.mounted) return null;
-    return _usableFolder(context, path);
+    return await _usableFolder(context, path);
   } on Exception catch (error) {
     if (!context.mounted) return null;
     await _tell(context, 'Could not open the folder picker.\n$error');

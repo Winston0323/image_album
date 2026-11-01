@@ -186,6 +186,106 @@ void main() {
       expect(find.text('1 / 3'), findsOneWidget);
     });
 
+    testWidgets('Page Down and Page Up move forward and back', (tester) async {
+      await open(tester);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
+      await _frames(tester);
+      expect(find.text('2 / 3'), findsOneWidget);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
+      await _frames(tester);
+      expect(find.text('3 / 3'), findsOneWidget);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.pageUp);
+      await _frames(tester);
+      expect(find.text('2 / 3'), findsOneWidget);
+    });
+
+    group('filmstrip', () {
+      Finder strip() => find.byType(ListView);
+
+      /// Border color of each thumbnail, in order.
+      List<Color> borders(WidgetTester tester) => [
+        for (final box in tester.widgetList<AnimatedContainer>(
+          find.descendant(
+            of: strip(),
+            matching: find.byType(AnimatedContainer),
+          ),
+        ))
+          ((box.decoration! as BoxDecoration).border! as Border).top.color,
+      ];
+
+      Color accent(WidgetTester tester) => Theme.of(
+        tester.element(find.byType(AlbumPreviewPage)),
+      ).colorScheme.primary;
+
+      testWidgets('shows every photo, the current one highlighted', (
+        tester,
+      ) async {
+        await open(tester);
+
+        expect(
+          find.descendant(of: strip(), matching: find.byType(Image)),
+          findsNWidgets(3),
+        );
+        expect(borders(tester), [
+          accent(tester),
+          Colors.transparent,
+          Colors.transparent,
+        ]);
+      });
+
+      testWidgets('the highlight follows the photo being viewed', (
+        tester,
+      ) async {
+        await open(tester);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+        await _frames(tester);
+
+        expect(find.text('2 / 3'), findsOneWidget);
+        expect(borders(tester), [
+          Colors.transparent,
+          accent(tester),
+          Colors.transparent,
+        ]);
+      });
+
+      testWidgets('tapping a thumbnail moves to that photo', (tester) async {
+        await open(tester);
+
+        await tester.tap(
+          find.descendant(of: strip(), matching: find.byType(Image)).last,
+        );
+        await _frames(tester);
+
+        expect(find.text('3 / 3'), findsOneWidget);
+        expect(borders(tester).last, accent(tester));
+      });
+
+      testWidgets('folds away with the bars, and comes back', (tester) async {
+        await open(tester);
+        Finder frame() =>
+            find.ancestor(of: strip(), matching: find.byType(ClipRect)).first;
+        expect(tester.getSize(frame()).height, greaterThan(60));
+
+        await tester.tapAt(const Offset(500, 300));
+        await _frames(tester);
+        expect(tester.getSize(frame()).height, 0);
+
+        await tester.tapAt(const Offset(500, 300));
+        await _frames(tester);
+        expect(tester.getSize(frame()).height, greaterThan(60));
+      });
+
+      testWidgets('is left out when there is only one photo', (tester) async {
+        await open(tester, count: 1);
+
+        expect(strip(), findsNothing);
+      });
+    });
+
     testWidgets('the side buttons move between photos too', (tester) async {
       await open(tester);
 

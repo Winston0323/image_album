@@ -119,6 +119,21 @@ List<AlbumPhoto> filterAlbumByExcluded(
   ];
 }
 
+/// The photos in [folder] or any folder below it, order kept. [folder] need
+/// not be normalized.
+List<AlbumPhoto> filterAlbumToFolder(List<AlbumPhoto> photos, String folder) {
+  final target = p.normalize(folder);
+  final inside = <String, bool>{};
+  return [
+    for (final photo in photos)
+      if (inside.putIfAbsent(p.dirname(photo.file.path), () {
+        final directory = p.normalize(p.dirname(photo.file.path));
+        return directory == target || p.isWithin(target, directory);
+      }))
+        photo,
+  ];
+}
+
 /// What a folder's checkbox shows.
 enum AlbumFolderState {
   /// The folder and everything below it is shown.
@@ -210,6 +225,9 @@ Set<String> albumToggleFolder(
   return next;
 }
 
+/// What a folder's menu can do.
+enum _FolderAction { focus, reveal, import, rename, delete }
+
 /// Folder trees, one per source folder, with a checkbox on every folder.
 /// Unchecking one hides its photos from the album; the hidden folders can be
 /// brought back at any time. Source folders can also be added and removed.
@@ -221,6 +239,13 @@ class AlbumFolderPanel extends StatefulWidget {
     required this.onChanged,
     required this.shown,
     required this.total,
+    this.highlighted,
+    this.focused,
+    this.onFocus,
+    this.onDeleteFolder,
+    this.onRenameFolder,
+    this.onRevealFolder,
+    this.onImportFolder,
     this.loading = false,
     this.onClose,
     this.onAddFolder,
@@ -246,6 +271,38 @@ class AlbumFolderPanel extends StatefulWidget {
   final int shown;
   final int total;
 
+  /// Adds "Delete folder" to the menu of every folder but a source, with the
+  /// folder to delete. The panel only asks; confirming and deleting are the
+  /// caller's.
+  final ValueChanged<AlbumFolderNode>? onDeleteFolder;
+
+  /// Adds "Rename images…" to the menu of every folder, with the folder whose
+  /// images are to be renamed. The panel only asks; the rest is the caller's.
+  final ValueChanged<AlbumFolderNode>? onRenameFolder;
+
+  /// Adds "Show in Explorer" to the menu of every folder, with the folder to
+  /// show. The panel only asks; opening the file manager is the caller's.
+  final ValueChanged<AlbumFolderNode>? onRevealFolder;
+
+  /// Adds "Import from camera…" to the menu of every folder, with the folder
+  /// the import creates its new folder in.
+  final ValueChanged<AlbumFolderNode>? onImportFolder;
+
+  /// Normalized path of the folder to mark, the one of the photo open in the
+  /// preview. Its row is shaded, and the tree opens and scrolls as needed to
+  /// show it.
+  final String? highlighted;
+
+  /// Normalized path of the folder the album is narrowed to, if any. Its row
+  /// is not shaded (only [highlighted] is); the tree opens it and folds the
+  /// other albums, and its menu offers the way back.
+  final String? focused;
+
+  /// Called with a folder's path when its row is clicked, to narrow the album
+  /// to it, or to widen it again when it is the focused one. Without it a
+  /// click on a row ticks its box, as the box itself does.
+  final ValueChanged<String>? onFocus;
+
   /// Whether the folder is still being scanned, so the counts may grow.
   final bool loading;
 
@@ -261,8 +318,238 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
   /// starts open, which lists its direct subfolders and nothing deeper.
   final Set<String> _flipped = {};
 
+  final ScrollController _scroll = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    final focused = widget.focused;
+    final highlighted = widget.highlighted;
+    if (focused != null) {
+      _reveal(focused, openTarget: true);
+    } else if (highlighted != null) {
+      _reveal(highlighted, openTarget: false);
+    }
+  }
+
+  @override
+  void didUpdateWidget(AlbumFolderPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final focused = widget.focused;
+    final highlighted = widget.highlighted;
+    if (focused != null && focused != oldWidget.focused) {
+      // An album was clicked: it opens, and the others fold away.
+      _reveal(focused, openTarget: true);
+    } else if (highlighted != null && highlighted != oldWidget.highlighted) {
+      _reveal(highlighted, openTarget: false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
   bool _isOpen(AlbumFolderNode node) =>
       (node.depth < 1) != _flipped.contains(node.path);
+
+  /// Narrows the album to [node], or widens it again when it is the one.
+  void _focus(AlbumFolderNode node, AlbumFolderState state) {
+    // A hidden folder cannot be looked at, so clicking one brings it back
+    // first.
+    if (state == AlbumFolderState.excluded) {
+      widget.onChanged(albumToggleFolder(node, widget.excluded, state));
+    }
+    widget.onFocus!(node.path);
+  }
+
+  /// Whether the folder has anything to put in its menu.
+  bool _hasMenu(AlbumFolderNode node) =>
+      widget.onFocus != null ||
+      widget.onRenameFolder != null ||
+      widget.onRevealFolder != null ||
+      widget.onImportFolder != null ||
+      (widget.onDeleteFolder != null && node.depth > 0);
+
+  /// The folder's menu, opened by a right click, a long press or the button
+  /// on its row, with its corner at [position] on screen.
+  Future<void> _showMenu(
+    AlbumFolderNode node,
+    AlbumFolderState state,
+    Offset position,
+  ) async {
+    final scheme = Theme.of(context).colorScheme;
+    final focused = node.path == widget.focused;
+    final canDelete = widget.onDeleteFolder != null && node.depth > 0;
+    final choice = await showMenu<_FolderAction>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        position.dx,
+        position.dy,
+        position.dx,
+        position.dy,
+      ),
+      items: [
+        if (widget.onFocus != null)
+          PopupMenuItem(
+            value: _FolderAction.focus,
+            child: ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                focused ? Icons.unfold_more_rounded : Icons.folder_open_rounded,
+              ),
+              title: Text(
+                focused ? 'Show the whole album' : 'Show only this folder',
+              ),
+            ),
+          ),
+        if (widget.onRevealFolder != null)
+          const PopupMenuItem(
+            value: _FolderAction.reveal,
+            child: ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.folder_shared_outlined),
+              title: Text('Show in Explorer'),
+            ),
+          ),
+        if (widget.onImportFolder != null)
+          const PopupMenuItem(
+            value: _FolderAction.import,
+            child: ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.add_photo_alternate_outlined),
+              title: Text('Import from camera…'),
+            ),
+          ),
+        if (widget.onRenameFolder != null)
+          const PopupMenuItem(
+            value: _FolderAction.rename,
+            child: ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.drive_file_rename_outline),
+              title: Text('Rename images…'),
+            ),
+          ),
+        if (canDelete) ...[
+          if (widget.onFocus != null ||
+              widget.onRevealFolder != null ||
+              widget.onImportFolder != null ||
+              widget.onRenameFolder != null)
+            const PopupMenuDivider(),
+          PopupMenuItem(
+            value: _FolderAction.delete,
+            child: ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.delete_outline_rounded, color: scheme.error),
+              title: Text(
+                'Delete folder…',
+                style: TextStyle(color: scheme.error),
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+    if (!mounted) return;
+    switch (choice) {
+      case _FolderAction.focus:
+        _focus(node, state);
+      case _FolderAction.reveal:
+        widget.onRevealFolder!(node);
+      case _FolderAction.import:
+        widget.onImportFolder!(node);
+      case _FolderAction.rename:
+        widget.onRenameFolder!(node);
+      case _FolderAction.delete:
+        widget.onDeleteFolder!(node);
+      case null:
+        break;
+    }
+  }
+
+  /// Opens the folders above [target] and, with [openTarget], the folder
+  /// itself to show what is inside it; closes every album but the one it is
+  /// in, so the tree shows one album at a time; then scrolls its row into
+  /// view. Does nothing while the folder is not in the tree, as during a
+  /// scan that has not reached it yet.
+  void _reveal(String target, {required bool openTarget}) {
+    AlbumFolderNode? node;
+    for (final root in widget.roots) {
+      if (root.path == target || p.isWithin(root.path, target)) {
+        node = root;
+        break;
+      }
+    }
+    if (node == null) return;
+    final above = <AlbumFolderNode>[];
+    while (node!.path != target) {
+      above.add(node);
+      AlbumFolderNode? next;
+      for (final child in node.children) {
+        if (child.path == target || p.isWithin(child.path, target)) {
+          next = child;
+          break;
+        }
+      }
+      if (next == null) return;
+      node = next;
+    }
+    // The album is the folder one level under its source. The source itself,
+    // and the photos lying in it, are in none.
+    final album = above.length > 1 ? above[1] : (above.isEmpty ? null : node);
+    final inAlbum = album == null
+        ? (String _) => false
+        : (String path) => path == album.path || p.isWithin(album.path, path);
+
+    void closeOthers(AlbumFolderNode folder) {
+      for (final child in folder.children) {
+        // Folders below a source start closed, so a flipped one is open.
+        if (!inAlbum(child.path) && _isOpen(child)) _flipped.remove(child.path);
+        closeOthers(child);
+      }
+    }
+
+    widget.roots.forEach(closeOthers);
+
+    for (final ancestor in above) {
+      if (!_isOpen(ancestor)) {
+        if (!_flipped.remove(ancestor.path)) _flipped.add(ancestor.path);
+      }
+    }
+    if (openTarget && node.children.isNotEmpty && !_isOpen(node)) {
+      _flipped.add(node.path);
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollTo(target));
+  }
+
+  void _scrollTo(String path) {
+    if (!mounted || !_scroll.hasClients) return;
+    final index = _rows().indexWhere((node) => node.path == path);
+    if (index < 0) return;
+    final extent = _FolderRow.heightFor(context);
+    const padding = 6.0;
+    final top = padding + index * extent;
+    final position = _scroll.position;
+    double? to;
+    if (top - padding < position.pixels) {
+      to = top - padding;
+    } else if (top + extent + padding >
+        position.pixels + position.viewportDimension) {
+      to = top + extent + padding - position.viewportDimension;
+    }
+    if (to == null) return;
+    _scroll.animateTo(
+      to.clamp(position.minScrollExtent, position.maxScrollExtent),
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+    );
+  }
 
   void _toggleOpen(AlbumFolderNode node) {
     setState(() {
@@ -312,7 +599,7 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
     final hiddenCount = widget.total - widget.shown;
 
     return Material(
-      color: scheme.surfaceContainerLow,
+      color: scheme.surfaceContainer,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -387,6 +674,7 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
                     (widget.roots.length == 1 &&
                         widget.roots.single.children.isEmpty &&
                         widget.onRemoveFolder == null &&
+                        widget.onImportFolder == null &&
                         !widget.loading))
                 ? Padding(
                     padding: const EdgeInsets.all(24),
@@ -400,6 +688,7 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
                     ),
                   )
                 : ListView.builder(
+                    controller: _scroll,
                     padding: const EdgeInsets.symmetric(vertical: 6),
                     itemExtent: _FolderRow.heightFor(context),
                     itemCount: rows.length,
@@ -415,6 +704,13 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
                             ? () => remove(node.path)
                             : null,
                         state: state,
+                        highlighted: node.path == widget.highlighted,
+                        onTap: widget.onFocus == null
+                            ? null
+                            : () => _focus(node, state),
+                        onMenu: _hasMenu(node)
+                            ? (position) => _showMenu(node, state, position)
+                            : null,
                         open: _isOpen(node),
                         onToggleOpen: node.children.isEmpty
                             ? null
@@ -439,6 +735,9 @@ class _FolderRow extends StatelessWidget {
     required this.onRemove,
     required this.reserveRemove,
     required this.state,
+    required this.highlighted,
+    required this.onTap,
+    required this.onMenu,
     required this.open,
     required this.onToggleOpen,
     required this.onToggleChecked,
@@ -472,6 +771,16 @@ class _FolderRow extends StatelessWidget {
   final bool reserveRemove;
 
   final AlbumFolderState state;
+
+  /// Whether this is the folder of the photo open in the preview. It is the\r\n  /// only thing a row is marked for.
+  final bool highlighted;
+
+  /// What a click on the row does. Null ticks the box.
+  final VoidCallback? onTap;
+
+  /// Opens the folder's menu with its corner at the given spot on screen.
+  /// Null when the folder has no menu.
+  final ValueChanged<Offset>? onMenu;
   final bool open;
 
   /// Null for a folder with no subfolders.
@@ -486,86 +795,143 @@ class _FolderRow extends StatelessWidget {
     final hidden = state == AlbumFolderState.excluded;
     final textColor = hidden ? scheme.onSurfaceVariant : scheme.onSurface;
 
-    return InkWell(
-      onTap: onToggleChecked,
+    final fill = highlighted ? scheme.secondaryContainer : Colors.transparent;
+
+    return Semantics(
+      selected: highlighted,
       child: Padding(
-        padding: EdgeInsets.only(left: 4.0 + 16.0 * node.depth, right: 12),
-        child: Row(
-          children: [
-            SizedBox(
-              width: 28,
-              child: onToggleOpen == null
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: Material(
+          // Only the folder of the photo open in the preview is shaded,
+          // rounded in from the panel's edges. The waterfall marks none.
+          color: fill,
+          borderRadius: BorderRadius.circular(8),
+          clipBehavior: Clip.antiAlias,
+          child: GestureDetector(
+            // A long press is how a touch screen asks for the menu; a right
+            // click is how a mouse does.
+            onLongPressStart: onMenu == null
+                ? null
+                : (details) => onMenu!(details.globalPosition),
+            child: InkWell(
+              onTap: onTap ?? onToggleChecked,
+              onSecondaryTapUp: onMenu == null
                   ? null
-                  : InkResponse(
-                      onTap: onToggleOpen,
-                      radius: 16,
-                      child: Icon(
-                        open
-                            ? Icons.expand_more_rounded
-                            : Icons.chevron_right_rounded,
-                        size: 20,
+                  : (details) => onMenu!(details.globalPosition),
+              child: Padding(
+                padding: EdgeInsets.only(left: 16.0 * node.depth, right: 8),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 28,
+                      child: onToggleOpen == null
+                          ? null
+                          : InkResponse(
+                              onTap: onToggleOpen,
+                              radius: 16,
+                              child: Icon(
+                                open
+                                    ? Icons.expand_more_rounded
+                                    : Icons.chevron_right_rounded,
+                                size: 20,
+                                color: scheme.onSurfaceVariant,
+                              ),
+                            ),
+                    ),
+                    Checkbox(
+                      value: switch (state) {
+                        AlbumFolderState.included => true,
+                        AlbumFolderState.excluded => false,
+                        AlbumFolderState.partial => null,
+                      },
+                      tristate: true,
+                      visualDensity: VisualDensity.compact,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      onChanged: (_) => onToggleChecked(),
+                    ),
+                    const SizedBox(width: 4),
+                    Icon(
+                      hidden
+                          ? Icons.folder_off_outlined
+                          : Icons.folder_outlined,
+                      size: 20,
+                      color: hidden ? scheme.outline : scheme.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Tooltip(
+                        // A source's full path tells apart folders that look alike.
+                        message: node.depth == 0 ? node.path : '',
+                        child: Text(
+                          label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: highlighted && !hidden
+                                ? scheme.onSecondaryContainer
+                                : textColor,
+                            fontWeight: highlighted ? FontWeight.w700 : null,
+                            decoration: hidden
+                                ? TextDecoration.lineThrough
+                                : null,
+                            decorationColor: scheme.outline,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      albumFormatCount(node.totalCount),
+                      style: theme.textTheme.labelMedium?.copyWith(
                         color: scheme.onSurfaceVariant,
                       ),
                     ),
-            ),
-            Checkbox(
-              value: switch (state) {
-                AlbumFolderState.included => true,
-                AlbumFolderState.excluded => false,
-                AlbumFolderState.partial => null,
-              },
-              tristate: true,
-              visualDensity: VisualDensity.compact,
-              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              onChanged: (_) => onToggleChecked(),
-            ),
-            const SizedBox(width: 4),
-            Icon(
-              hidden ? Icons.folder_off_outlined : Icons.folder_outlined,
-              size: 20,
-              color: hidden ? scheme.outline : scheme.onSurfaceVariant,
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Tooltip(
-                // A source's full path tells apart folders that look alike.
-                message: node.depth == 0 ? node.path : '',
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: textColor,
-                    decoration: hidden ? TextDecoration.lineThrough : null,
-                    decorationColor: scheme.outline,
-                  ),
+                    if (onRemove != null)
+                      IconButton(
+                        tooltip: 'Remove folder',
+                        onPressed: onRemove,
+                        iconSize: 18,
+                        visualDensity: VisualDensity.compact,
+                        constraints: const BoxConstraints.tightFor(
+                          width: 32,
+                          height: 32,
+                        ),
+                        padding: EdgeInsets.zero,
+                        color: scheme.onSurfaceVariant,
+                        icon: const Icon(Icons.close_rounded),
+                      )
+                    else if (onMenu != null)
+                      Builder(
+                        builder: (buttonContext) => IconButton(
+                          tooltip: 'Folder options',
+                          onPressed: () {
+                            // Opens just under the button.
+                            final box =
+                                buttonContext.findRenderObject()! as RenderBox;
+                            onMenu!(
+                              box.localToGlobal(
+                                Offset(box.size.width, box.size.height),
+                              ),
+                            );
+                          },
+                          iconSize: 18,
+                          visualDensity: VisualDensity.compact,
+                          constraints: const BoxConstraints.tightFor(
+                            width: 32,
+                            height: 32,
+                          ),
+                          padding: EdgeInsets.zero,
+                          color: scheme.onSurfaceVariant,
+                          icon: const Icon(Icons.more_vert_rounded),
+                        ),
+                      )
+                    else if (reserveRemove)
+                      const SizedBox(width: 32),
+                  ],
                 ),
               ),
             ),
-            const SizedBox(width: 8),
-            Text(
-              albumFormatCount(node.totalCount),
-              style: theme.textTheme.labelMedium?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
-            ),
-            if (onRemove != null)
-              IconButton(
-                tooltip: 'Remove folder',
-                onPressed: onRemove,
-                iconSize: 18,
-                visualDensity: VisualDensity.compact,
-                constraints: const BoxConstraints.tightFor(
-                  width: 32,
-                  height: 32,
-                ),
-                padding: EdgeInsets.zero,
-                color: scheme.onSurfaceVariant,
-                icon: const Icon(Icons.close_rounded),
-              )
-            else if (reserveRemove)
-              const SizedBox(width: 32),
-          ],
+          ),
         ),
       ),
     );

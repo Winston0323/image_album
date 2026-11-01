@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart' show PointerScrollEvent;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -42,7 +43,7 @@ const double _infoDockMinWidth = 900;
 ///
 /// Tap the photo to hide or show the bars, double-tap to zoom, pinch or scroll
 /// to zoom further. On desktop the arrow keys and side buttons move between
-/// photos and Escape closes the viewer.
+/// photos (so do Page Up and Page Down) and Escape closes the viewer.
 ///
 /// The info button opens a sidebar on the right with the current photo's
 /// details. On a wide window it sits beside the photo, which shrinks to make
@@ -54,14 +55,29 @@ class AlbumPreviewPage extends StatefulWidget {
     required this.photos,
     required this.initialIndex,
     this.library,
+    this.onClose,
+    this.onPhotoChanged,
+    this.corner,
   });
 
   final List<AlbumPhoto> photos;
   final int initialIndex;
 
+  /// Called with the photo now showing each time the viewer moves to another.
+  final ValueChanged<AlbumPhoto>? onPhotoChanged;
+
+  /// Called when the user closes the viewer (back button or Escape). Without
+  /// it the viewer is taken to be a route of its own and pops itself.
+  final VoidCallback? onClose;
+
   /// The album file the grid's thumbnails are kept in, so the preview finds
   /// the same ones already decoded.
   final AlbumLibrary? library;
+
+  /// Drawn at the top right of the photo, over it. The import page uses it to
+  /// show the files of the shot (its JPEG and its raw) and to switch which
+  /// one is on screen.
+  final Widget Function(AlbumPhoto photo)? corner;
 
   @override
   State<AlbumPreviewPage> createState() => _AlbumPreviewPageState();
@@ -99,16 +115,34 @@ class _AlbumPreviewPageState extends State<AlbumPreviewPage>
   /// a desktop window does not change the decode (and re-decode) every frame.
   Size _box = const Size(1280, 1280);
 
+  /// Takes the keyboard when the viewer opens. `autofocus` alone would lose to
+  /// the album underneath when the viewer is shown over it rather than as a
+  /// route of its own.
+  final FocusNode _focus = FocusNode(debugLabel: 'AlbumPreview');
+
   @override
   void initState() {
     super.initState();
     if (_previousCacheBytes < _previewCacheBytes) {
       _imageCache.maximumSizeBytes = _previewCacheBytes;
     }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focus.requestFocus();
+    });
+  }
+
+  void _close() {
+    final onClose = widget.onClose;
+    if (onClose != null) {
+      onClose();
+    } else {
+      Navigator.of(context).maybePop();
+    }
   }
 
   @override
   void dispose() {
+    _focus.dispose();
     _imageCache.maximumSizeBytes = _previousCacheBytes;
     _infoSlide.dispose();
     _zoomed.dispose();
@@ -181,10 +215,6 @@ class _AlbumPreviewPageState extends State<AlbumPreviewPage>
   @override
   Widget build(BuildContext context) {
     final photo = widget.photos[_index];
-    final width = MediaQuery.sizeOf(context).width;
-    final wide = width >= _sideButtonsMinWidth;
-    final docked = width >= _infoDockMinWidth;
-
     final info = PhotoInfoPanel(photo: photo, onClose: _toggleInfo);
 
     return Scaffold(
@@ -193,60 +223,123 @@ class _AlbumPreviewPageState extends State<AlbumPreviewPage>
         bindings: {
           const SingleActivator(LogicalKeyboardKey.arrowLeft): () => _go(-1),
           const SingleActivator(LogicalKeyboardKey.arrowRight): () => _go(1),
-          const SingleActivator(LogicalKeyboardKey.escape): () =>
-              Navigator.of(context).maybePop(),
+          const SingleActivator(LogicalKeyboardKey.pageUp): () => _go(-1),
+          const SingleActivator(LogicalKeyboardKey.pageDown): () => _go(1),
+          const SingleActivator(LogicalKeyboardKey.escape): _close,
         },
         child: Focus(
+          focusNode: _focus,
           autofocus: true,
-          child: Stack(
-            children: [
-              Row(
-                children: [
-                  Expanded(child: _viewer(photo, wide)),
-                  // The photo gives up room as the sidebar opens, and takes it
-                  // back as it closes. The sidebar keeps its full width and is
-                  // revealed from the right edge, so its text never reflows.
-                  if (docked)
-                    AnimatedBuilder(
-                      animation: _infoCurve,
-                      builder: (context, _) => _infoSlide.isDismissed
-                          ? const SizedBox.shrink()
-                          : ClipRect(
-                              child: Align(
-                                alignment: Alignment.centerRight,
-                                widthFactor: _infoCurve.value,
-                                child: SizedBox(width: _infoWidth, child: info),
-                              ),
-                            ),
-                    ),
-                ],
-              ),
-              if (!docked)
-                AnimatedBuilder(
-                  animation: _infoCurve,
-                  builder: (context, _) => _infoSlide.isDismissed
-                      ? const SizedBox.shrink()
-                      : Positioned(
-                          top: 0,
-                          bottom: 0,
-                          right: 0,
-                          width: math.min(_infoWidth, width * 0.85),
-                          child: FractionalTranslation(
-                            translation: Offset(1 - _infoCurve.value, 0),
-                            child: Material(elevation: 8, child: info),
-                          ),
-                        ),
-                ),
-            ],
+          // Sized by the room the viewer is given, not the window: beside the
+          // album's folder panel it has less than the whole width.
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final width = constraints.maxWidth;
+              return _layout(photo, info, width);
+            },
           ),
         ),
       ),
     );
   }
 
-  /// The photo pager with its bars and buttons. Fills whatever room the info
-  /// sidebar leaves.
+  Widget _layout(AlbumPhoto photo, Widget info, double width) {
+    final wide = width >= _sideButtonsMinWidth;
+    final docked = width >= _infoDockMinWidth;
+    return Stack(
+      children: [
+        Row(
+          children: [
+            Expanded(child: _viewer(photo, wide)),
+            // The photo gives up room as the sidebar opens, and takes it
+            // back as it closes. The sidebar keeps its full width and is
+            // revealed from the right edge, so its text never reflows.
+            if (docked)
+              AnimatedBuilder(
+                animation: _infoCurve,
+                builder: (context, _) => _infoSlide.isDismissed
+                    ? const SizedBox.shrink()
+                    : ClipRect(
+                        child: Align(
+                          alignment: Alignment.centerRight,
+                          widthFactor: _infoCurve.value,
+                          child: SizedBox(width: _infoWidth, child: info),
+                        ),
+                      ),
+              ),
+          ],
+        ),
+        if (!docked)
+          AnimatedBuilder(
+            animation: _infoCurve,
+            builder: (context, _) => _infoSlide.isDismissed
+                ? const SizedBox.shrink()
+                : Positioned(
+                    top: 0,
+                    bottom: 0,
+                    right: 0,
+                    width: math.min(_infoWidth, width * 0.85),
+                    child: FractionalTranslation(
+                      translation: Offset(1 - _infoCurve.value, 0),
+                      child: Material(elevation: 8, child: info),
+                    ),
+                  ),
+          ),
+      ],
+    );
+  }
+
+  /// Moves to the photo at [index], as the filmstrip asks. A short hop
+  /// slides; a long one jumps, so the pager does not decode every photo it
+  /// would pass.
+  void _goTo(int index) {
+    if (index == _index || index < 0 || index >= widget.photos.length) return;
+    // Leaving a zoomed photo: the next one starts at its own size, and
+    // swiping is allowed again.
+    _zoomed.value = false;
+    if ((index - _index).abs() > 3) {
+      _controller.jumpToPage(index);
+    } else {
+      _controller.animateToPage(
+        index,
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOutCubic,
+      );
+    }
+  }
+
+  /// The photo with a strip of its neighbors beneath it. Fills whatever room
+  /// the info sidebar leaves.
   Widget _viewer(AlbumPhoto photo, bool wide) {
+    return Column(
+      children: [
+        Expanded(child: _photoArea(photo, wide)),
+        if (widget.photos.length > 1)
+          // Folds away with the bars when the photo is tapped.
+          TweenAnimationBuilder<double>(
+            tween: Tween<double>(end: _chromeVisible ? 1 : 0),
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOut,
+            builder: (context, t, child) => ClipRect(
+              child: Align(
+                alignment: Alignment.topCenter,
+                heightFactor: t,
+                child: child,
+              ),
+            ),
+            child: _Filmstrip(
+              photos: widget.photos,
+              index: _index,
+              library: widget.library,
+              onSelect: _goTo,
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// The photo pager with its bars and buttons.
+  Widget _photoArea(AlbumPhoto photo, bool wide) {
     return Stack(
       children: [
         Positioned.fill(
@@ -258,6 +351,7 @@ class _AlbumPreviewPageState extends State<AlbumPreviewPage>
               itemCount: widget.photos.length,
               onPageChanged: (index) {
                 setState(() => _index = index);
+                widget.onPhotoChanged?.call(widget.photos[index]);
                 _precacheNeighborsAfterFrame(index);
               },
               itemBuilder: (context, index) {
@@ -275,6 +369,8 @@ class _AlbumPreviewPageState extends State<AlbumPreviewPage>
             ),
           ),
         ),
+        if (widget.corner != null)
+          Positioned(top: 72, right: 16, child: widget.corner!(photo)),
         if (wide) ...[
           _SideButton(
             alignment: Alignment.centerLeft,
@@ -296,7 +392,7 @@ class _AlbumPreviewPageState extends State<AlbumPreviewPage>
           top: true,
           child: Row(
             children: [
-              const BackButton(color: Colors.white),
+              BackButton(color: Colors.white, onPressed: _close),
               Expanded(
                 child: Text(
                   '${_index + 1} / ${widget.photos.length}',
@@ -363,6 +459,172 @@ class _AlbumPreviewPageState extends State<AlbumPreviewPage>
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Side of one thumbnail in the filmstrip.
+const double _filmThumb = 60;
+
+/// Space between thumbnails, and above and below the strip.
+const double _filmGap = 6;
+
+/// Width of the highlight around the current thumbnail. Every thumbnail has a
+/// border this wide, clear when it is not the current one, so none moves when
+/// the highlight does.
+const double _filmBorder = 2.5;
+
+/// Height of the whole filmstrip.
+const double _filmHeight = _filmThumb + _filmGap * 2 + _filmBorder * 2;
+
+/// A row of small copies of the photos before and after the current one, with
+/// a highlighted border on the current one. It scrolls to keep that one in the
+/// middle, and a tap on another moves to it.
+class _Filmstrip extends StatefulWidget {
+  const _Filmstrip({
+    required this.photos,
+    required this.index,
+    required this.library,
+    required this.onSelect,
+  });
+
+  final List<AlbumPhoto> photos;
+  final int index;
+  final AlbumLibrary? library;
+  final ValueChanged<int> onSelect;
+
+  @override
+  State<_Filmstrip> createState() => _FilmstripState();
+}
+
+class _FilmstripState extends State<_Filmstrip> {
+  final ScrollController _scroll = ScrollController();
+
+  static const double _extent = _filmThumb + _filmBorder * 2 + _filmGap;
+  static const double _edge = 12;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _center(animate: false),
+    );
+  }
+
+  @override
+  void didUpdateWidget(_Filmstrip oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.index != widget.index) _center(animate: true);
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  /// Scrolls so the current thumbnail is in the middle, or as near as the ends
+  /// of the strip allow.
+  void _center({required bool animate}) {
+    if (!mounted || !_scroll.hasClients) return;
+    final position = _scroll.position;
+    final target =
+        (_edge +
+                widget.index * _extent +
+                _extent / 2 -
+                position.viewportDimension / 2)
+            .clamp(position.minScrollExtent, position.maxScrollExtent);
+    if (animate) {
+      _scroll.animateTo(
+        target,
+        duration: const Duration(milliseconds: 260),
+        curve: Curves.easeOutCubic,
+      );
+    } else {
+      _scroll.jumpTo(target);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
+    return Container(
+      height: _filmHeight,
+      color: Colors.black,
+      // A mouse wheel scrolls the strip sideways, which it would not do on its
+      // own.
+      child: Listener(
+        onPointerSignal: (event) {
+          if (event is PointerScrollEvent && _scroll.hasClients) {
+            final position = _scroll.position;
+            _scroll.jumpTo(
+              (_scroll.offset + event.scrollDelta.dy).clamp(
+                position.minScrollExtent,
+                position.maxScrollExtent,
+              ),
+            );
+          }
+        },
+        child: ListView.builder(
+          controller: _scroll,
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: _edge),
+          itemExtent: _extent,
+          itemCount: widget.photos.length,
+          itemBuilder: (context, i) {
+            final current = i == widget.index;
+            final photo = widget.photos[i];
+            return Padding(
+              padding: const EdgeInsets.only(right: _filmGap),
+              child: Semantics(
+                button: true,
+                selected: current,
+                label: photo.fileName,
+                child: GestureDetector(
+                  onTap: () => widget.onSelect(i),
+                  child: MouseRegion(
+                    cursor: SystemMouseCursors.click,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 160),
+                      margin: const EdgeInsets.symmetric(vertical: _filmGap),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: current ? accent : Colors.transparent,
+                          width: _filmBorder,
+                        ),
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(5),
+                        child: AnimatedOpacity(
+                          opacity: current ? 1 : 0.6,
+                          duration: const Duration(milliseconds: 160),
+                          child: Image(
+                            image: albumThumbnailProvider(
+                              photo.file,
+                              library: widget.library,
+                            ),
+                            fit: BoxFit.cover,
+                            gaplessPlayback: true,
+                            errorBuilder: (_, _, _) => const ColoredBox(
+                              color: Colors.white12,
+                              child: Icon(
+                                Icons.broken_image_outlined,
+                                color: Colors.white38,
+                                size: 20,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ),
     );
   }
 }

@@ -2,9 +2,12 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart' show kSecondaryMouseButton;
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image_album/image_album.dart';
 import 'package:image_album/src/album_folders.dart';
+import 'package:image_album/src/album_preview_page.dart';
 import 'package:path/path.dart' as p;
 
 final String _root = p.join('library', 'album');
@@ -268,6 +271,12 @@ void main() {
       }
     }
 
+    /// The checkbox on the row of the folder called [name].
+    Finder checkboxOf(String name) => find.descendant(
+      of: find.ancestor(of: find.text(name), matching: find.byType(InkWell)),
+      matching: find.byType(Checkbox),
+    );
+
     void sizeWindow(WidgetTester tester, Size size) {
       tester.view.devicePixelRatio = 1;
       tester.view.physicalSize = size;
@@ -301,6 +310,1053 @@ void main() {
       expect(find.byType(Image), findsNWidgets(4));
     });
 
+    testWidgets('the tree sits on the left, the grid to its right', (
+      tester,
+    ) async {
+      sizeWindow(tester, const Size(1200, 900));
+      await populate(tester);
+      await tester.pumpWidget(app());
+      await settle(tester);
+
+      final bar = tester.getRect(find.byTooltip('Folders'));
+      final panel = tester.getRect(find.byType(AlbumFolderPanel));
+      expect(panel.left, bar.right);
+      expect(panel.width, 300);
+      expect(
+        tester.getTopLeft(find.byType(Image).first).dx,
+        greaterThan(panel.right - 1),
+      );
+    });
+
+    testWidgets('closing the tree slides it away rather than jumping', (
+      tester,
+    ) async {
+      sizeWindow(tester, const Size(1200, 900));
+      await populate(tester);
+      await tester.pumpWidget(app());
+      await settle(tester);
+
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // Part way: still there, but its edge has moved in from where it was.
+      // The panel keeps its width and is clipped, so it is the edge that moves.
+      final barRight = tester.getRect(find.byTooltip('Folders')).right;
+      final edge = tester.getRect(find.byType(AlbumFolderPanel)).right;
+      expect(edge, inExclusiveRange(barRight, barRight + 300));
+
+      await tester.pumpAndSettle();
+      expect(find.byType(AlbumFolderPanel), findsNothing);
+
+      // And it comes back the same way from the bar.
+      await tester.tap(find.byTooltip('Folders'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.byType(AlbumFolderPanel), findsOneWidget);
+      await tester.pumpAndSettle();
+      expect(
+        tester.getRect(find.byType(AlbumFolderPanel)).right,
+        tester.getRect(find.byTooltip('Folders')).right + 300,
+      );
+    });
+
+    testWidgets('Tab folds the tree away and brings it back', (tester) async {
+      sizeWindow(tester, const Size(1200, 900));
+      await populate(tester);
+      await tester.pumpWidget(app());
+      await settle(tester);
+      expect(find.byType(AlbumFolderPanel), findsOneWidget);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pumpAndSettle();
+      expect(find.byType(AlbumFolderPanel), findsNothing);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pumpAndSettle();
+      expect(find.byType(AlbumFolderPanel), findsOneWidget);
+    });
+
+    testWidgets('Tab works with a photo open beside the tree', (tester) async {
+      sizeWindow(tester, const Size(1200, 900));
+      await populate(tester);
+      await tester.pumpWidget(app());
+      await settle(tester);
+      await tester.tap(find.byType(Image).first);
+      await settle(tester);
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(AlbumPreviewPage), findsOneWidget);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(AlbumFolderPanel), findsNothing);
+      // The photo is still open, and now has the room.
+      expect(find.byType(AlbumPreviewPage), findsOneWidget);
+      expect(
+        tester.getRect(find.byType(AlbumPreviewPage)).left,
+        tester.getRect(find.byTooltip('Folders')).right,
+      );
+    });
+
+    testWidgets('a photo opens beside the tree, which stays until closed', (
+      tester,
+    ) async {
+      sizeWindow(tester, const Size(1200, 900));
+      await populate(tester);
+      await tester.pumpWidget(app());
+      await settle(tester);
+
+      // The second photo is in Pets, which holds two.
+      await tester.tap(find.byType(Image).at(1));
+      await settle(tester);
+      await tester.pump(const Duration(milliseconds: 400));
+
+      // The viewer is open, and the tree is still there to its left.
+      expect(find.textContaining(' / 2'), findsOneWidget);
+      expect(find.byType(AlbumFolderPanel), findsOneWidget);
+      final panel = tester.getRect(find.byType(AlbumFolderPanel));
+      final viewer = tester.getRect(find.byType(AlbumPreviewPage));
+      expect(panel.left, tester.getRect(find.byTooltip('Folders')).right);
+      expect(viewer.left, greaterThanOrEqualTo(panel.right));
+      expect(viewer.right, 1200);
+
+      // Zooming does not push the viewer over the tree.
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(find.byType(PageView));
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.tap(find.byType(PageView));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(AlbumFolderPanel), findsOneWidget);
+
+      // Closing the viewer leaves the tree open.
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(find.byType(AlbumPreviewPage), findsNothing);
+      expect(find.byType(AlbumFolderPanel), findsOneWidget);
+    });
+
+    group('the folder menu', () {
+      Widget withConfirm(List<(String, int)> asked, {bool answer = true}) =>
+          MaterialApp(
+            home: ImageAlbum(
+              path: temp.path,
+              recursive: true,
+              confirmDeleteFolder: (context, name, count) async {
+                asked.add((name, count));
+                return answer;
+              },
+            ),
+          );
+
+      Future<void> openMenu(WidgetTester tester, String folder) async {
+        await tester.tap(find.text(folder), buttons: kSecondaryMouseButton);
+        await tester.pumpAndSettle();
+      }
+
+      testWidgets('a right click opens it, with a way to delete', (
+        tester,
+      ) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        await openMenu(tester, 'Pets');
+
+        expect(find.text('Show only this folder'), findsOneWidget);
+        expect(find.text('Delete folder…'), findsOneWidget);
+        // A menu, not a click: nothing was narrowed or ticked.
+        expect(find.byType(Image), findsNWidgets(4));
+      });
+
+      testWidgets('so does the button on the row', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        await tester.tap(find.byTooltip('Folder options').at(1));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Delete folder…'), findsOneWidget);
+      });
+
+      testWidgets('and so does a long press', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        await tester.longPress(find.text('Pets'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Delete folder…'), findsOneWidget);
+      });
+
+      testWidgets('the source itself cannot be deleted from it', (
+        tester,
+      ) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        await openMenu(tester, p.basename(temp.path));
+
+        expect(find.text('Show only this folder'), findsOneWidget);
+        expect(find.text('Delete folder…'), findsNothing);
+      });
+
+      testWidgets('its first entry narrows the album', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        await openMenu(tester, 'Pets');
+        await tester.tap(find.text('Show only this folder'));
+        await tester.pumpAndSettle();
+
+        expect(find.byType(Image), findsNWidgets(2));
+        // And on the folder it is narrowed to, it offers the way back.
+        await openMenu(tester, 'Pets');
+        expect(find.text('Show the whole album'), findsOneWidget);
+      });
+
+      testWidgets('deleting asks first, and No leaves everything', (
+        tester,
+      ) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        final asked = <(String, int)>[];
+        await tester.pumpWidget(withConfirm(asked, answer: false));
+        await settle(tester);
+
+        await openMenu(tester, 'Pets');
+        await tester.tap(find.text('Delete folder…'));
+        await settle(tester);
+
+        expect(asked, [('Pets', 2)]);
+        expect(find.byType(Image), findsNWidgets(4));
+        expect(Directory(p.join(temp.path, 'Pets')).existsSync(), isTrue);
+      });
+
+      testWidgets('Yes deletes its photos and the folder', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        final asked = <(String, int)>[];
+        await tester.pumpWidget(withConfirm(asked));
+        await settle(tester);
+
+        await openMenu(tester, 'Pets');
+        await tester.tap(find.text('Delete folder…'));
+        await settle(tester);
+        await settle(tester);
+
+        expect(asked, [('Pets', 2)]);
+        expect(find.byType(Image), findsNWidgets(2));
+        expect(find.text('Pets'), findsNothing);
+        expect(Directory(p.join(temp.path, 'Pets')).existsSync(), isFalse);
+        expect(File(p.join(temp.path, 'root.jpg')).existsSync(), isTrue);
+      });
+
+      testWidgets('a folder takes the ones inside it along', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        final asked = <(String, int)>[];
+        await tester.pumpWidget(withConfirm(asked));
+        await settle(tester);
+
+        await openMenu(tester, 'Trips');
+        await tester.tap(find.text('Delete folder…'));
+        await settle(tester);
+        await settle(tester);
+
+        // Paris was the only photo in Trips.
+        expect(asked, [('Trips', 1)]);
+        expect(Directory(p.join(temp.path, 'Trips')).existsSync(), isFalse);
+      });
+
+      testWidgets('a folder with something else in it stays', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.runAsync(
+          () => File(p.join(temp.path, 'Pets', 'notes.txt')).writeAsString('x'),
+        );
+        await tester.pumpWidget(withConfirm([]));
+        await settle(tester);
+
+        await openMenu(tester, 'Pets');
+        await tester.tap(find.text('Delete folder…'));
+        await settle(tester);
+        await settle(tester);
+
+        expect(File(p.join(temp.path, 'Pets', 'a.jpg')).existsSync(), isFalse);
+        expect(
+          File(p.join(temp.path, 'Pets', 'notes.txt')).existsSync(),
+          isTrue,
+        );
+        expect(find.byType(Image), findsNWidgets(2));
+      });
+
+      Set<String> namesIn(String relative) => Directory(
+        p.join(temp.path, relative),
+      ).listSync().whereType<File>().map((f) => p.basename(f.path)).toSet();
+
+      testWidgets('Show in Explorer opens the folder', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        final shown = <String>[];
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ImageAlbum(
+              path: temp.path,
+              recursive: true,
+              revealFolder: (path) async => shown.add(path),
+            ),
+          ),
+        );
+        await settle(tester);
+
+        await openMenu(tester, 'Pets');
+        await tester.tap(find.text('Show in Explorer'));
+        await tester.pumpAndSettle();
+
+        expect(shown.map(p.normalize), [p.join(temp.path, 'Pets')]);
+        // Only looked at: nothing was narrowed.
+        expect(find.byType(Image), findsNWidgets(4));
+      });
+
+      testWidgets('the source row can be shown too', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        final shown = <String>[];
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ImageAlbum(
+              path: temp.path,
+              recursive: true,
+              revealFolder: (path) async => shown.add(path),
+            ),
+          ),
+        );
+        await settle(tester);
+
+        await openMenu(tester, p.basename(temp.path));
+        await tester.tap(find.text('Show in Explorer'));
+        await tester.pumpAndSettle();
+
+        expect(shown.map(p.normalize), [p.normalize(temp.path)]);
+      });
+
+      testWidgets('a folder that cannot be opened is reported', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ImageAlbum(
+              path: temp.path,
+              recursive: true,
+              revealFolder: (path) async =>
+                  throw const FileSystemException('no'),
+            ),
+          ),
+        );
+        await settle(tester);
+
+        await openMenu(tester, 'Pets');
+        await tester.tap(find.text('Show in Explorer'));
+        await tester.pump();
+        await tester.pump();
+
+        expect(
+          find.textContaining('Could not open the folder'),
+          findsOneWidget,
+        );
+      });
+
+      testWidgets('renaming offers a name, and numbers the images', (
+        tester,
+      ) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        await openMenu(tester, 'Pets');
+        expect(find.text('Rename images…'), findsOneWidget);
+        await tester.tap(find.text('Rename images…'));
+        await tester.pumpAndSettle();
+
+        // The folder's own name is the starting point, and there is nothing
+        // below Pets to choose about.
+        expect(find.widgetWithText(TextField, 'Pets'), findsOneWidget);
+        expect(find.text('Include the folders inside'), findsNothing);
+
+        await tester.enterText(find.byType(TextField), 'cat');
+        await tester.pump();
+        expect(find.textContaining('cat_001.jpg'), findsOneWidget);
+        await tester.tap(find.text('Rename'));
+        await tester.pumpAndSettle();
+        await settle(tester);
+        await settle(tester);
+
+        expect(namesIn('Pets'), {'cat_001.jpg', 'cat_002.jpg'});
+        expect(File(p.join(temp.path, 'root.jpg')).existsSync(), isTrue);
+      });
+
+      testWidgets('cancelling changes nothing', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        await openMenu(tester, 'Pets');
+        await tester.tap(find.text('Rename images…'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Cancel'));
+        await tester.pumpAndSettle();
+
+        expect(namesIn('Pets'), {'a.jpg', 'b.jpg'});
+      });
+
+      testWidgets('the folders inside are left alone unless asked for', (
+        tester,
+      ) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        // Trips holds nothing itself, only Paris with one photo.
+        await openMenu(tester, 'Trips');
+        await tester.tap(find.text('Rename images…'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Include the folders inside'), findsOneWidget);
+        expect(find.text('There are no images to rename.'), findsOneWidget);
+        expect(
+          tester
+              .widget<FilledButton>(find.widgetWithText(FilledButton, 'Rename'))
+              .onPressed,
+          isNull,
+        );
+
+        await tester.tap(find.text('Include the folders inside'));
+        await tester.pump();
+        expect(
+          tester
+              .widget<FilledButton>(find.widgetWithText(FilledButton, 'Rename'))
+              .onPressed,
+          isNotNull,
+        );
+        await tester.tap(find.text('Rename'));
+        await tester.pumpAndSettle();
+        await settle(tester);
+        await settle(tester);
+
+        expect(namesIn(p.join('Trips', 'Paris')), {'Trips_001.jpg'});
+      });
+
+      testWidgets('without that choice a folder keeps what is inside it', (
+        tester,
+      ) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.runAsync(() async {
+          await File(
+            p.join(temp.path, 'Pets', 'deep', 'd.jpg'),
+          ).create(recursive: true);
+          await File(
+            p.join(temp.path, 'Pets', 'deep', 'd.jpg'),
+          ).writeAsBytes(onePixelPng);
+        });
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        await openMenu(tester, 'Pets');
+        await tester.tap(find.text('Rename images…'));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(TextField), 'cat');
+        await tester.tap(find.text('Rename'));
+        await tester.pumpAndSettle();
+        await settle(tester);
+        await settle(tester);
+
+        expect(namesIn('Pets'), {'cat_001.jpg', 'cat_002.jpg'});
+        expect(namesIn(p.join('Pets', 'deep')), {'d.jpg'});
+      });
+
+      testWidgets('deleting the folder it is narrowed to widens it', (
+        tester,
+      ) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(withConfirm([]));
+        await settle(tester);
+        await tester.tap(find.text('Pets'));
+        await tester.pumpAndSettle();
+
+        await openMenu(tester, 'Pets');
+        await tester.tap(find.text('Delete folder…'));
+        await settle(tester);
+        await settle(tester);
+
+        expect(find.byType(InputChip), findsNothing);
+        expect(find.byType(Image), findsNWidgets(2));
+      });
+    });
+
+    group('narrowing the album to one folder', () {
+      /// Whether the row of [name] is filled with any colour. The waterfall
+      /// marks no folder, so while narrowed none ever is; the chip names the
+      /// folder instead.
+      bool filled(WidgetTester tester, String name) {
+        final scheme = Theme.of(
+          tester.element(find.byType(AlbumFolderPanel)),
+        ).colorScheme;
+        return tester
+            .widgetList<Material>(
+              find.ancestor(
+                of: find.text(name),
+                matching: find.byType(Material),
+              ),
+            )
+            .any(
+              (material) =>
+                  material.color == scheme.primaryContainer ||
+                  material.color == scheme.secondaryContainer,
+            );
+      }
+
+      Finder chip() => find.byType(InputChip);
+
+      testWidgets('clicking a folder shows only its photos', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+        expect(chip(), findsNothing);
+
+        await tester.tap(find.text('Pets'));
+        await tester.pumpAndSettle();
+
+        expect(find.byType(Image), findsNWidgets(2));
+        expect(filled(tester, 'Pets'), isFalse);
+        expect(filled(tester, 'Trips'), isFalse);
+        // The rest is set aside, not hidden: no checkbox changed.
+        expect(find.text('2 photos'), findsOneWidget);
+        expect(find.text('4 photos'), findsOneWidget); // the panel's total
+        expect(chip(), findsOneWidget);
+        expect(find.textContaining('Pets · 2 photos'), findsOneWidget);
+      });
+
+      testWidgets('a folder takes its subfolders along', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        await tester.tap(find.text('Trips'));
+        await tester.pumpAndSettle();
+        expect(find.byType(Image), findsNWidgets(1));
+      });
+
+      testWidgets('the cross on the chip leaves it', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+        await tester.tap(find.text('Pets'));
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byTooltip('Show the whole album'));
+        await tester.pumpAndSettle();
+
+        expect(find.byType(Image), findsNWidgets(4));
+        expect(chip(), findsNothing);
+        expect(filled(tester, 'Pets'), isFalse);
+      });
+
+      testWidgets('Escape leaves it', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+        await tester.tap(find.text('Pets'));
+        await tester.pumpAndSettle();
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+
+        expect(find.byType(Image), findsNWidgets(4));
+        expect(chip(), findsNothing);
+      });
+
+      testWidgets('clicking the same folder again leaves it', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        await tester.tap(find.text('Pets'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Pets'));
+        await tester.pumpAndSettle();
+
+        expect(find.byType(Image), findsNWidgets(4));
+        expect(chip(), findsNothing);
+      });
+
+      testWidgets('another folder replaces the first', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        await tester.tap(find.text('Pets'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Trips'));
+        await tester.pumpAndSettle();
+
+        expect(find.byType(Image), findsNWidgets(1));
+        expect(filled(tester, 'Trips'), isFalse);
+        expect(filled(tester, 'Pets'), isFalse);
+      });
+
+      testWidgets('the source row means the whole album', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+        await tester.tap(find.text('Pets'));
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text(p.basename(temp.path)));
+        await tester.pumpAndSettle();
+
+        expect(find.byType(Image), findsNWidgets(4));
+        expect(chip(), findsNothing);
+      });
+
+      testWidgets('the preview holds just what the grid shows', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        // Narrowed to the source's root nothing changes; narrowed to Pets the
+        // two photos are all there is to page through.
+        await tester.tap(find.text('Pets'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byType(Image).first);
+        await settle(tester);
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.textContaining('1 / 2'), findsOneWidget);
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+        // Escape closed the photo only; the album is still narrowed.
+        expect(find.byType(AlbumPreviewPage), findsNothing);
+        expect(chip(), findsOneWidget);
+      });
+
+      testWidgets('clicking a hidden folder brings it back first', (
+        tester,
+      ) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app(excluded: {p.join(temp.path, 'Pets')}));
+        await settle(tester);
+        expect(find.byType(Image), findsNWidgets(2));
+
+        await tester.tap(find.text('Pets'));
+        await tester.pumpAndSettle();
+
+        expect(find.byType(Image), findsNWidgets(2));
+        expect(filled(tester, 'Pets'), isFalse);
+        expect(find.text('4 photos'), findsOneWidget);
+      });
+
+      testWidgets('hiding the folder it is narrowed to widens it', (
+        tester,
+      ) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+        await tester.tap(find.text('Pets'));
+        await tester.pumpAndSettle();
+
+        await tester.tap(checkboxOf('Pets'));
+        await tester.pumpAndSettle();
+
+        expect(chip(), findsNothing);
+        expect(find.byType(Image), findsNWidgets(2)); // Pets hidden, rest shown
+      });
+
+      testWidgets(
+        'on a narrow window the sheet closes once a folder is picked',
+        (tester) async {
+          sizeWindow(tester, const Size(500, 900));
+          await populate(tester);
+          await tester.pumpWidget(app());
+          await settle(tester);
+
+          await tester.tap(find.byTooltip('Folders'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Pets'));
+          await tester.pumpAndSettle();
+
+          expect(find.text('Folders'), findsOneWidget);
+          expect(find.byType(Image), findsNWidgets(2));
+          expect(chip(), findsOneWidget);
+        },
+      );
+    });
+
+    group('albums are the folders one level under the source', () {
+      Future<void> open(WidgetTester tester, int index) async {
+        await tester.tap(find.byType(Image).at(index));
+        await settle(tester);
+        await tester.pump(const Duration(milliseconds: 400));
+      }
+
+      testWidgets('the preview holds only the album of the photo', (
+        tester,
+      ) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        // Newest first: root, Pets/a, Pets/b, Trips/Paris/p.
+        await open(tester, 1);
+        expect(find.textContaining('1 / 2'), findsOneWidget);
+
+        // The last of Pets is the end: the next photo in the grid is in Trips.
+        await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
+        await tester.pumpAndSettle();
+        expect(find.textContaining('2 / 2'), findsOneWidget);
+        await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
+        await tester.pumpAndSettle();
+        expect(find.textContaining('2 / 2'), findsOneWidget);
+      });
+
+      testWidgets('a deeper folder belongs to its album', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        // Trips/Paris is part of the Trips album, which holds only it.
+        await open(tester, 3);
+        expect(find.textContaining('1 / 1'), findsOneWidget);
+      });
+
+      testWidgets('photos lying in the source itself are an album', (
+        tester,
+      ) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        await open(tester, 0);
+        expect(find.textContaining('1 / 1'), findsOneWidget);
+      });
+
+      testWidgets('each source has its own albums', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        final other = await tester.runAsync(() async {
+          final dir = await Directory.systemTemp.createTemp(
+            'image_album_other',
+          );
+          final file = File(p.join(dir.path, 'Pets', 'z.jpg'));
+          await file.create(recursive: true);
+          await file.writeAsBytes(onePixelPng);
+          await file.setLastModified(
+            DateTime.now().subtract(const Duration(minutes: 30)),
+          );
+          return dir;
+        });
+        addTearDown(() async {
+          try {
+            await other!.delete(recursive: true);
+          } on FileSystemException {
+            // Left for the system to clear.
+          }
+        });
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ImageAlbum(paths: [temp.path, other!.path], recursive: true),
+          ),
+        );
+        await settle(tester);
+
+        // A Pets folder in each source: still two separate albums.
+        await open(tester, 1);
+        expect(find.textContaining('1 / 2'), findsOneWidget);
+      });
+    });
+
+    group('one album is open at a time', () {
+      Future<void> populateDeeper(WidgetTester tester) async {
+        await populate(tester);
+        await tester.runAsync(() async {
+          final file = File(p.join(temp.path, 'Pets', 'Cats', 'c.jpg'));
+          await file.create(recursive: true);
+          await file.writeAsBytes(onePixelPng);
+        });
+      }
+
+      testWidgets('clicking an album opens it', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populateDeeper(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+        expect(find.text('Cats'), findsNothing);
+
+        await tester.tap(find.text('Pets'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Cats'), findsOneWidget);
+        // Only that one: the other album stays shut.
+        expect(find.text('Paris'), findsNothing);
+      });
+
+      testWidgets('and folds the album that was open', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populateDeeper(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        await tester.tap(find.text('Pets'));
+        await tester.pumpAndSettle();
+        expect(find.text('Cats'), findsOneWidget);
+
+        await tester.tap(find.text('Trips'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Paris'), findsOneWidget);
+        expect(find.text('Cats'), findsNothing);
+        // Folded, not gone: its own row is still there to click.
+        expect(find.text('Pets'), findsOneWidget);
+      });
+
+      testWidgets('a folder deeper in an album keeps its album open', (
+        tester,
+      ) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populateDeeper(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        await tester.tap(find.text('Trips'));
+        await tester.pumpAndSettle();
+        expect(find.text('Paris'), findsOneWidget);
+
+        // Opening a folder by its arrow, as before, is left to the user.
+        await tester.tap(find.byIcon(Icons.chevron_right_rounded).first);
+        await tester.pumpAndSettle();
+        expect(find.text('Cats'), findsOneWidget);
+        expect(find.text('Paris'), findsOneWidget);
+      });
+
+      testWidgets('clicking a photo folds the other albums too', (
+        tester,
+      ) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populateDeeper(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        await tester.tap(find.text('Trips'));
+        await tester.pumpAndSettle();
+        expect(find.text('Paris'), findsOneWidget);
+
+        // Back to the whole album, which leaves the tree as it is.
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+        expect(find.text('Paris'), findsOneWidget);
+
+        // Pets/a is the second photo, newest first.
+        await tester.tap(find.byType(Image).at(1));
+        await settle(tester);
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Paris'), findsNothing);
+      });
+    });
+
+    group('the folder of the clicked photo', () {
+      bool marked(WidgetTester tester, String name) {
+        final shade = Theme.of(
+          tester.element(find.byType(AlbumFolderPanel)),
+        ).colorScheme.secondaryContainer;
+        return tester
+            .widgetList<Material>(
+              find.ancestor(
+                of: find.text(name),
+                matching: find.byType(Material),
+              ),
+            )
+            .any((material) => material.color == shade);
+      }
+
+      Future<void> open(WidgetTester tester, int index) async {
+        await tester.tap(find.byType(Image).at(index));
+        await settle(tester);
+        await tester.pump(const Duration(milliseconds: 400));
+      }
+
+      testWidgets('is marked in the tree', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        // Nothing is marked before a click.
+        expect(marked(tester, 'Pets'), isFalse);
+        expect(marked(tester, 'Trips'), isFalse);
+
+        // The grid runs newest first: root, Pets/a, Pets/b, Trips/Paris/p.
+        await open(tester, 1);
+        expect(marked(tester, 'Pets'), isTrue);
+        expect(marked(tester, 'Trips'), isFalse);
+        expect(marked(tester, p.basename(temp.path)), isFalse);
+      });
+
+      testWidgets('opens the folders above it', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+        expect(find.text('Paris'), findsNothing);
+
+        await open(tester, 3);
+        await tester.pumpAndSettle();
+
+        expect(find.text('Paris'), findsOneWidget);
+        expect(marked(tester, 'Paris'), isTrue);
+        expect(marked(tester, 'Trips'), isFalse);
+      });
+
+      testWidgets('follows the preview from photo to photo', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        // Pets is an album of a, b and the deeper c.
+        await tester.runAsync(() async {
+          final file = File(p.join(temp.path, 'Pets', 'Cats', 'c.jpg'));
+          await file.create(recursive: true);
+          await file.writeAsBytes(onePixelPng);
+          await file.setLastModified(
+            DateTime.now().subtract(const Duration(minutes: 10)),
+          );
+        });
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        // Newest first: root, Pets/a, Pets/b, Trips/Paris/p, Pets/Cats/c.
+        await open(tester, 1);
+        expect(marked(tester, 'Pets'), isTrue);
+        expect(marked(tester, 'Cats'), isFalse);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
+        await tester.pumpAndSettle();
+        await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
+        await tester.pumpAndSettle();
+        expect(find.textContaining('3 / 3'), findsOneWidget);
+        expect(marked(tester, 'Cats'), isTrue);
+        expect(marked(tester, 'Pets'), isFalse);
+      });
+
+      testWidgets('is unmarked once the preview closes', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        await open(tester, 1);
+        expect(marked(tester, 'Pets'), isTrue);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+
+        expect(find.byType(AlbumPreviewPage), findsNothing);
+        expect(marked(tester, 'Pets'), isFalse);
+      });
+
+      testWidgets('is unmarked once a full-screen preview closes', (
+        tester,
+      ) async {
+        // Too narrow for the tree beside the grid: the preview is a page.
+        sizeWindow(tester, const Size(500, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        await open(tester, 1);
+        await tester.pumpAndSettle();
+        expect(find.byType(AlbumPreviewPage), findsOneWidget);
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+        expect(find.byType(AlbumPreviewPage), findsNothing);
+
+        // The tree, opened from the bar, has nothing marked.
+        await tester.tap(find.byTooltip('Folders'));
+        await tester.pumpAndSettle();
+        expect(marked(tester, 'Pets'), isFalse);
+      });
+
+      testWidgets('picking a photo marks nothing', (tester) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.tap(find.byType(Image).at(1));
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await tester.pump();
+
+        expect(find.byType(AlbumPreviewPage), findsNothing);
+        expect(marked(tester, 'Pets'), isFalse);
+      });
+
+      testWidgets('the waterfall marks no folder, narrowed or not', (
+        tester,
+      ) async {
+        sizeWindow(tester, const Size(1200, 900));
+        await populate(tester);
+        await tester.pumpWidget(app());
+        await settle(tester);
+
+        // Narrowed to Trips, whose one photo is in Paris below it: the album
+        // is cut down, and no row is marked for it.
+        await tester.tap(find.text('Trips'));
+        await tester.pumpAndSettle();
+        expect(find.byType(Image), findsNWidgets(1));
+        expect(marked(tester, 'Trips'), isFalse);
+        expect(marked(tester, 'Paris'), isFalse);
+
+        // A photo open in the preview marks its folder, and only that one.
+        await open(tester, 0);
+        await tester.pumpAndSettle();
+        expect(marked(tester, 'Paris'), isTrue);
+        expect(marked(tester, 'Trips'), isFalse);
+
+        // Back on the waterfall every mark is gone.
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+        expect(find.byType(AlbumPreviewPage), findsNothing);
+        expect(marked(tester, 'Paris'), isFalse);
+        expect(marked(tester, 'Trips'), isFalse);
+      });
+    });
+
     testWidgets('unticking a folder hides its photos and reports it', (
       tester,
     ) async {
@@ -310,7 +1366,7 @@ void main() {
       await tester.pumpWidget(app(onChanged: reported.add));
       await settle(tester);
 
-      await tester.tap(find.text('Pets'));
+      await tester.tap(checkboxOf('Pets'));
       await tester.pump();
 
       expect(find.byType(Image), findsNWidgets(2));
@@ -376,7 +1432,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Pets'), findsOneWidget);
 
-      await tester.tap(find.text('Pets'));
+      await tester.tap(checkboxOf('Pets'));
       await tester.pumpAndSettle();
       // The sheet is still open and shows the new state.
       expect(find.text('2 of 4 photos shown'), findsOneWidget);

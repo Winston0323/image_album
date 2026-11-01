@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import 'album_cache.dart';
+import 'album_catalog.dart';
 import 'album_images.dart';
 
 /// How the caches inside an [AlbumLibrary] are made and kept.
@@ -299,25 +300,40 @@ class AlbumLibrary extends ChangeNotifier {
     } catch (_) {}
   }
 
-  /// How much room the caches take.
+  /// How much room the caches take. The catalogs kept inside the source
+  /// folders count with the indexes.
   Future<AlbumCacheUsage> cacheUsage() async {
     final thumbnails = await _measure(thumbnailDirectory, '.thumb');
     final indexes = await _measure(indexDirectory, '.tsv');
+    var catalogs = 0;
+    var catalogBytes = 0;
+    for (final source in _sources) {
+      try {
+        final file = albumCatalogFile(source);
+        if (!await file.exists()) continue;
+        catalogBytes += await file.length();
+        catalogs++;
+      } catch (_) {}
+    }
     return AlbumCacheUsage(
       thumbnailCount: thumbnails.$1,
       thumbnailBytes: thumbnails.$2,
-      indexCount: indexes.$1,
-      indexBytes: indexes.$2,
+      indexCount: indexes.$1 + catalogs,
+      indexBytes: indexes.$2 + catalogBytes,
     );
   }
 
-  /// Deletes every thumbnail and index. The next opening rebuilds them, so it
-  /// is slower. Sources, hidden folders and options are kept.
+  /// Deletes every thumbnail and index, and the catalog in each source folder.
+  /// The next opening rebuilds them, so it is slower. Sources, hidden folders
+  /// and options are kept.
   Future<void> clearCaches() async {
     for (final directory in [thumbnailDirectory, indexDirectory]) {
       try {
         if (await directory.exists()) await directory.delete(recursive: true);
       } catch (_) {}
+    }
+    for (final source in _sources) {
+      await deleteAlbumCatalog(source);
     }
     _indexes.clear();
     await _save();

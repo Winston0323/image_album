@@ -281,7 +281,15 @@ void main() {
       await settle(tester);
 
       // Beta's tree starts open, with Deep in it. Hide just that.
-      await tester.tap(find.text('Deep'));
+      await tester.tap(
+        find.descendant(
+          of: find.ancestor(
+            of: find.text('Deep'),
+            matching: find.byType(InkWell),
+          ),
+          matching: find.byType(Checkbox),
+        ),
+      );
       await tester.pump();
 
       expect(find.byType(Image), findsNWidgets(4));

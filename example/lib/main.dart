@@ -228,6 +228,7 @@ class _AlbumHomeState extends State<_AlbumHome> {
       onFileTypesChanged: (types) => library.setFileTypes(types),
       onAddSource: _addSource,
       onRemoveSource: _removeSource,
+      pickFolder: () => pickAlbumFolder(context),
       actions: [
         IconButton(
           tooltip: 'Cache',
