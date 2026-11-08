@@ -23,16 +23,16 @@ bool albumNeedsConversion(String path) =>
 /// photo is shown without rather than risk running out of memory.
 const int _maxDecodePixels = 120 * 1000 * 1000;
 
-/// A preview with at least this many pixels is taken as the photo's real
-/// preview. A smaller one is only a thumbnail, and the rest of the file is
-/// searched for better.
-const int _goodPreviewPixels = 500 * 1000;
-
 /// How far into a file the search for a preview goes.
 const int _searchBytes = 96 << 20;
 
-/// How far past a good preview the search goes for a better one.
+/// How far past a full-size preview the search goes for a better one.
 const int _searchPastBest = 4 << 20;
+
+/// A JPEG at least this long on one side is the camera's full picture, so the
+/// search can stop. Anything smaller (the usual 1616px preview) is kept only
+/// until a larger one turns up.
+const int _fullPreviewSide = 3000;
 
 /// Bytes read at a time while searching.
 const int _chunkBytes = 1 << 20;
@@ -56,9 +56,7 @@ Future<Uint8List?> albumDecodableBytes(String path, {int? maxSide}) async {
 
     if (!tiff) {
       final preview = await _embeddedJpeg(file);
-      if (preview != null) {
-        return orientation == 1 ? preview : _rotated(preview, orientation);
-      }
+      if (preview != null) return _uprightJpeg(preview, orientation);
     }
 
     final decoded = await _decodeTiff(file, orientation, maxSide);
@@ -67,9 +65,7 @@ Future<Uint8List?> albumDecodableBytes(String path, {int? maxSide}) async {
     if (tiff) {
       // A TIFF that will not decode may still carry a JPEG.
       final preview = await _embeddedJpeg(file);
-      if (preview != null) {
-        return orientation == 1 ? preview : _rotated(preview, orientation);
-      }
+      if (preview != null) return _uprightJpeg(preview, orientation);
     }
   } catch (_) {
     // Unreadable or not what its name says: nothing to show.
@@ -179,17 +175,116 @@ Future<int> _orientationOf(File file) async {
   }
 }
 
-/// [jpeg] turned to the upright position for EXIF [orientation].
-Uint8List? _rotated(Uint8List jpeg, int orientation) {
+/// [jpeg] as upright pixels with no Orientation tag, so Flutter will not turn
+/// it again.
+///
+/// For a camera raw, [tiffOrientation] from IFD0 is the way the camera was
+/// held. The embedded JPEG may:
+///
+/// * carry no tag (Sony often) — landscape pixels, turn from the TIFF;
+/// * carry Orientation=1 on landscape pixels — same;
+/// * carry the same tag as the TIFF — `decodeJpg` has already turned the
+///   pixels, so re-encoding without a tag is enough. Returning the original
+///   bytes would leave the tag for Flutter, which then turns them twice (or
+///   not at all on some desktops), both wrong.
+Uint8List _uprightJpeg(Uint8List jpeg, int tiffOrientation) {
+  final jpegOrientation = _jpegOrientation(jpeg);
   final decoded = img.decodeJpg(jpeg);
   if (decoded == null) return jpeg;
-  // A preview that says which way up it is has already been dealt with by
-  // whoever made it, and Flutter honours that. Only one that says nothing is
-  // turned here.
-  if (decoded.exif.imageIfd.hasOrientation) return jpeg;
-  final upright = _bake(decoded, orientation);
-  return img.encodeJpg(upright, quality: 92);
+
+  // decodeJpg has already applied [jpegOrientation] to the pixels.
+  final target = tiffOrientation;
+  final img.Image upright;
+  if (jpegOrientation == target) {
+    upright = decoded;
+  } else if (jpegOrientation == 1) {
+    upright = _bake(decoded, target);
+  } else if (target == 1) {
+    upright = _bake(decoded, _invertOrientation(jpegOrientation));
+  } else {
+    upright = _bake(
+      _bake(decoded, _invertOrientation(jpegOrientation)),
+      target,
+    );
+  }
+
+  upright.exif.imageIfd.orientation = null;
+  if (jpegOrientation == 1 && target == 1) return jpeg;
+  // The compressed data has to be rewritten once the pixels are turned.
+  // Quality 100 keeps that from throwing away detail.
+  return Uint8List.fromList(img.encodeJpg(upright, quality: 100));
 }
+
+/// Orientation tag inside a JPEG's EXIF APP1, or 1 when it has none.
+int _jpegOrientation(Uint8List jpeg) {
+  if (jpeg.length < 4 || jpeg[0] != 0xFF || jpeg[1] != 0xD8) return 1;
+  var i = 2;
+  while (i + 4 <= jpeg.length) {
+    if (jpeg[i] != 0xFF) break;
+    final marker = jpeg[i + 1];
+    // Standalone markers have no length.
+    if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD9)) {
+      i += 2;
+      continue;
+    }
+    if (marker == 0xDA) break; // start of scan
+    final len = (jpeg[i + 2] << 8) | jpeg[i + 3];
+    if (len < 2 || i + 2 + len > jpeg.length) break;
+    if (marker == 0xE1 && len >= 8) {
+      final start = i + 4;
+      // "Exif\0\0"
+      if (jpeg[start] == 0x45 &&
+          jpeg[start + 1] == 0x78 &&
+          jpeg[start + 2] == 0x69 &&
+          jpeg[start + 3] == 0x66 &&
+          jpeg[start + 4] == 0 &&
+          jpeg[start + 5] == 0) {
+        final value = _orientationInTiffBlob(
+          Uint8List.sublistView(jpeg, start + 6, i + 2 + len),
+        );
+        if (value != null) return value;
+      }
+    }
+    i += 2 + len;
+  }
+  return 1;
+}
+
+/// EXIF Orientation (0x0112) from a TIFF header blob, or null.
+int? _orientationInTiffBlob(Uint8List tiff) {
+  if (tiff.length < 8) return null;
+  final le = tiff[0] == 0x49 && tiff[1] == 0x49;
+  final be = tiff[0] == 0x4D && tiff[1] == 0x4D;
+  if (!le && !be) return null;
+  int u16(int o) =>
+      le ? tiff[o] | (tiff[o + 1] << 8) : (tiff[o] << 8) | tiff[o + 1];
+  int u32(int o) => le
+      ? tiff[o] | (tiff[o + 1] << 8) | (tiff[o + 2] << 16) | (tiff[o + 3] << 24)
+      : (tiff[o] << 24) |
+            (tiff[o + 1] << 16) |
+            (tiff[o + 2] << 8) |
+            tiff[o + 3];
+  final ifd = u32(4);
+  if (ifd + 2 > tiff.length) return null;
+  final count = u16(ifd);
+  for (var e = 0; e < count; e++) {
+    final off = ifd + 2 + e * 12;
+    if (off + 12 > tiff.length) break;
+    if (u16(off) != 0x0112) continue;
+    final type = u16(off + 2);
+    final value = type == 3 ? u16(off + 8) : u32(off + 8);
+    if (value >= 1 && value <= 8) return value;
+  }
+  return null;
+}
+
+/// The orientation that undoes [orientation].
+int _invertOrientation(int orientation) => switch (orientation) {
+  2 || 3 || 4 || 5 || 7 => orientation, // flips / 180 / transpose: self-inverse
+  6 => 8,
+  8 => 6,
+  _ => 1,
+};
 
 img.Image _bake(img.Image image, int orientation) {
   if (orientation == 1) return image;
@@ -557,11 +652,31 @@ Uint8List? _lzwDecode(Uint8List data, int expected) {
 // ---------------------------------------------------------------------------
 // Finding the preview
 
-/// The preview a raw names in its TIFF directories. Only those directories
-/// are read, not the rest of the file, so a grid tile can be drawn while the
-/// card is still being listed. Null when the file names none.
+/// Turns [jpeg] upright using the orientation stored in the raw at [path].
+Future<Uint8List> albumApplyRawOrientation(Uint8List jpeg, String path) {
+  return _orientationOf(
+    File(path),
+  ).then((orientation) => _uprightJpeg(jpeg, orientation));
+}
+
+/// A fast picture for [path]: the JPEG a raw names in its directories, without
+/// searching the rest of the file. Falls back to a normal decode when the
+/// file names none.
+Future<Uint8List?> albumQuickPreviewBytes(String path) async {
+  if (albumNeedsConversion(path)) {
+    final named = await albumEmbeddedPreview(File(path));
+    if (named != null) return named;
+  }
+  return albumDecodableBytes(path);
+}
+
+/// The preview a raw names in its TIFF directories, turned upright from the
+/// camera's orientation. Only those directories are read, not the rest of the
+/// file, so a grid tile can be drawn while the card is still being listed.
+/// Null when the file names none.
 Future<Uint8List?> albumEmbeddedPreview(File file) async {
   RandomAccessFile? raf;
+  Uint8List? bytes;
   try {
     raf = await file.open();
     final best = await _jpegFromDirectories(raf, await raf.length());
@@ -570,31 +685,31 @@ Future<Uint8List?> albumEmbeddedPreview(File file) async {
       return null;
     }
     await raf.setPosition(best.offset);
-    final bytes = await raf.read(best.length);
-    return bytes.length == best.length ? bytes : null;
+    final read = await raf.read(best.length);
+    if (read.length != best.length) return null;
+    bytes = read;
   } catch (_) {
     return null;
   } finally {
     await raf?.close();
   }
+
+  return _uprightJpeg(bytes, await _orientationOf(file));
 }
 
 /// The biggest JPEG inside [file], or null when there is none.
 ///
-/// First the picture directories of the TIFF structure are asked, which is
-/// quick. When they only hold a thumbnail, the file is searched for JPEG data
-/// itself, since cameras keep their large previews in places (a maker note)
-/// that differ from one to the next.
+/// The TIFF directories are asked first. Cameras often name only a small
+/// preview there and keep the full-size JPEG in a maker note, so the file is
+/// always searched as well and the larger of the two is used.
 Future<Uint8List?> _embeddedJpeg(File file) async {
   final raf = await file.open();
   try {
     final length = await raf.length();
     var best = await _jpegFromDirectories(raf, length);
-    if (best == null || best.pixels < _goodPreviewPixels) {
-      final found = await _searchJpegs(raf, length);
-      if (found != null && (best == null || found.pixels > best.pixels)) {
-        best = found;
-      }
+    final found = await _searchJpegs(raf, length);
+    if (found != null && (best == null || found.pixels > best.pixels)) {
+      best = found;
     }
     if (best == null) return null;
     await raf.setPosition(best.offset);
@@ -603,6 +718,23 @@ Future<Uint8List?> _embeddedJpeg(File file) async {
   } finally {
     await raf.close();
   }
+}
+
+/// A JPEG shot next to a raw, with the same name. That file is the camera's
+/// full picture; the raw's embedded preview is often only a couple of
+/// megapixels.
+File? albumSiblingJpeg(File raw) {
+  final dir = p.dirname(raw.path);
+  final base = p.basenameWithoutExtension(raw.path);
+  for (final ext in const ['.jpg', '.jpeg', '.JPG', '.JPEG']) {
+    final candidate = File(p.join(dir, '$base$ext'));
+    if (p.extension(candidate.path).toLowerCase() ==
+        p.extension(raw.path).toLowerCase()) {
+      continue;
+    }
+    if (candidate.existsSync()) return candidate;
+  }
+  return null;
 }
 
 /// A JPEG found in a file: where it starts, how long it is and how many
@@ -695,17 +827,20 @@ Future<_Span?> _searchJpegs(RandomAccessFile raf, int length) async {
       position += chunk.length - 3;
     }
 
-    // A real preview is found early. Once one is in hand and a few more
-    // megabytes hold nothing bigger, the sensor data that follows is not
-    // worth reading through.
+    // Once a full-size photo is in hand, a few more megabytes with nothing
+    // bigger is enough. A smaller preview does not stop the search: the
+    // full JPEG is often stored further along.
     if (best != null &&
-        best.pixels >= _goodPreviewPixels &&
+        _isFullPreview(best) &&
         position > best.offset + best.length + _searchPastBest) {
       break;
     }
   }
   return best;
 }
+
+bool _isFullPreview(_Span span) =>
+    span.width >= _fullPreviewSide || span.height >= _fullPreviewSide;
 
 /// The JPEG that starts at [start]: its length and size in pixels. Null when
 /// what is there is not a whole JPEG, or not one Flutter can draw.

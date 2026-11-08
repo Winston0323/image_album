@@ -1,8 +1,11 @@
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
+import 'album_films.dart';
+import 'album_gear_page.dart';
 import 'album_photo.dart';
 import 'album_widgets.dart';
 
@@ -11,7 +14,14 @@ import 'album_widgets.dart';
 /// Only folders that hold photos, directly or deeper down, appear, so the tree
 /// never lists empty branches.
 class AlbumFolderNode {
-  AlbumFolderNode._(this.path, this.name, this.parent, this.depth);
+  AlbumFolderNode._(
+    this.path,
+    this.name,
+    this.parent,
+    this.depth, {
+    this.filmHeader = false,
+    this.filmIcon,
+  });
 
   /// Normalized path. This is the form exclusions are stored and compared in.
   final String path;
@@ -21,6 +31,13 @@ class AlbumFolderNode {
 
   /// 0 for the album's own folder.
   final int depth;
+
+  /// A film stock. Its row wears the film box, and the folders under it are
+  /// the rolls.
+  final bool filmHeader;
+
+  /// Box art for [filmHeader], or null for a letter tile.
+  final String? filmIcon;
 
   /// Subfolders, sorted by name.
   final List<AlbumFolderNode> children = [];
@@ -84,6 +101,88 @@ AlbumFolderNode buildAlbumFolderTree(List<AlbumPhoto> photos, String root) {
 
   finish(top);
   return top;
+}
+
+/// Every folder under [root]. A film tree drops folders that hold no pictures,
+/// so an empty `120` or `135` folder is not listed. A digital tree keeps
+/// empty folders.
+///
+/// Names that start with a dot are skipped. [AlbumFolderNode.directCount] is
+/// the pictures sitting directly in that folder.
+Future<AlbumFolderNode> buildAlbumDirectoryTree(
+  String root, {
+  bool filmHeader = false,
+  String? filmIcon,
+}) async {
+  final rootPath = p.normalize(root);
+  final rootName = p.basename(rootPath);
+  final top = AlbumFolderNode._(
+    rootPath,
+    rootName.isEmpty ? rootPath : rootName,
+    null,
+    0,
+    filmHeader: filmHeader,
+    filmIcon: filmIcon,
+  );
+
+  Future<void> walk(Directory directory, AlbumFolderNode node) async {
+    if (!await directory.exists()) return;
+    final children = <AlbumFolderNode>[];
+    await for (final entity in directory.list(followLinks: false)) {
+      final name = p.basename(entity.path);
+      if (name.startsWith('.')) continue;
+      if (entity is Directory) {
+        final child = AlbumFolderNode._(
+          p.normalize(entity.path),
+          name,
+          node,
+          node.depth + 1,
+        );
+        await walk(entity, child);
+        children.add(child);
+        continue;
+      }
+      if (entity is File &&
+          albumImageExtensions.contains(p.extension(name).toLowerCase())) {
+        node.directCount++;
+      }
+    }
+    children.sort(
+      (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+    );
+    for (final child in children) {
+      // Lightroom Classic writes its JPEG exports into a JPG folder beside
+      // the originals. That folder is the same roll, not another one.
+      if (child.name.toLowerCase() == 'jpg' && node.directCount > 0) {
+        node.directCount += child.directCount;
+        continue;
+      }
+      node.children.add(child);
+    }
+  }
+
+  await walk(Directory(rootPath), top);
+
+  int finish(AlbumFolderNode node) {
+    var total = node.directCount;
+    for (final child in node.children) {
+      total += finish(child);
+    }
+    return node.totalCount = total;
+  }
+
+  finish(top);
+  if (filmHeader) _dropEmptyFolders(top);
+  return top;
+}
+
+/// A film folder with no pictures is not shown. An empty `120` or `135`
+/// under Superia stays hidden.
+void _dropEmptyFolders(AlbumFolderNode node) {
+  node.children.removeWhere((child) => child.totalCount == 0);
+  for (final child in node.children) {
+    _dropEmptyFolders(child);
+  }
 }
 
 /// [photos] without those in an excluded folder or any folder below one.
@@ -226,7 +325,7 @@ Set<String> albumToggleFolder(
 }
 
 /// What a folder's menu can do.
-enum _FolderAction { focus, reveal, import, rename, delete }
+enum _FolderAction { focus, reveal, meta, import, rename, delete }
 
 /// Folder trees, one per source folder, with a checkbox on every folder.
 /// Unchecking one hides its photos from the album; the hidden folders can be
@@ -246,10 +345,26 @@ class AlbumFolderPanel extends StatefulWidget {
     this.onRenameFolder,
     this.onRevealFolder,
     this.onImportFolder,
+    this.onFolderMeta,
+    this.expandRoots = false,
     this.loading = false,
     this.onClose,
     this.onAddFolder,
     this.onRemoveFolder,
+    this.filmKinds = const [],
+    this.locatedFilmKeys = const {},
+    this.filmFolderLabels = const {},
+    this.selectedFilmKey,
+    this.onFilmKindTap,
+    this.onAssignFilmKind,
+    this.onClearFilmKind,
+    this.openFilmFolders = const [],
+    this.filmPaths = const [],
+    this.onFilmHeader,
+    this.onPickFilmLibrary,
+    this.filmLibraryChosen = false,
+    this.showFolderTree = true,
+    this.heading = 'Folders',
   });
 
   /// The source folders, each the top of its own tree.
@@ -261,6 +376,49 @@ class AlbumFolderPanel extends StatefulWidget {
   /// Adds a remove button to every source folder when set. Called with the
   /// source's path.
   final ValueChanged<String>? onRemoveFolder;
+
+  /// ApertureDiary's film kinds, shown in the film tab.
+  final List<AlbumFilmKind> filmKinds;
+
+  /// Icon keys that already have a folder under the film library.
+  final Set<String> locatedFilmKeys;
+
+  /// Folder name to show for a located kind, such as the name Windows kept.
+  final Map<String, String> filmFolderLabels;
+
+  /// Icon key of the film open in the waterfall.
+  final String? selectedFilmKey;
+
+  /// Opens the pictures for a kind that has a folder.
+  final ValueChanged<AlbumFilmKind>? onFilmKindTap;
+
+  /// Right-click: the user picks the folder for this kind.
+  final ValueChanged<AlbumFilmKind>? onAssignFilmKind;
+
+  /// Right-click: drop the folder linked to this kind. The pictures stay.
+  final ValueChanged<AlbumFilmKind>? onClearFilmKind;
+
+  /// Folders directly under the open film.
+  final List<AlbumFolderNode> openFilmFolders;
+
+  /// Paths of film stocks. A folder at or under one of these is a film folder.
+  final List<String> filmPaths;
+
+  /// Opens or closes the film at this path: its folders fold out under the
+  /// film box, and its pictures fill the grid.
+  final ValueChanged<String>? onFilmHeader;
+
+  /// Asks for the folder that holds the film scans.
+  final VoidCallback? onPickFilmLibrary;
+
+  /// Whether a film library has been chosen, so the button reads Change.
+  final bool filmLibraryChosen;
+
+  /// The digital folder tree. Off when the panel is showing films.
+  final bool showFolderTree;
+
+  /// Title at the top of the panel.
+  final String heading;
 
   /// Normalized paths of the excluded folders.
   final Set<String> excluded;
@@ -288,14 +446,21 @@ class AlbumFolderPanel extends StatefulWidget {
   /// the import creates its new folder in.
   final ValueChanged<AlbumFolderNode>? onImportFolder;
 
+  /// Right-click "Metadata…" for a folder. Used for a film's folders.
+  final ValueChanged<AlbumFolderNode>? onFolderMeta;
+
+  /// Opens each root when the panel is first shown, so the folders under a
+  /// film are visible without an extra click.
+  final bool expandRoots;
+
   /// Normalized path of the folder to mark, the one of the photo open in the
   /// preview. Its row is shaded, and the tree opens and scrolls as needed to
-  /// show it.
+  /// show it. While no photo is open, [focused] is shaded instead.
   final String? highlighted;
 
   /// Normalized path of the folder the album is narrowed to, if any. Its row
-  /// is not shaded (only [highlighted] is); the tree opens it and folds the
-  /// other albums, and its menu offers the way back.
+  /// is shaded while no photo is open. The tree opens it and folds the other
+  /// albums, and its menu offers the way back.
   final String? focused;
 
   /// Called with a folder's path when its row is clicked, to narrow the album
@@ -314,15 +479,23 @@ class AlbumFolderPanel extends StatefulWidget {
 }
 
 class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
-  /// Folders the user flipped from their default. Only the album's own folder
-  /// starts open, which lists its direct subfolders and nothing deeper.
-  final Set<String> _flipped = {};
+  /// Folders the user has opened. Everything starts collapsed.
+  final Set<String> _opened = {};
+
+  /// Which film group is listed. Null until a button is clicked, so the list
+  /// opens on films that have a folder when any do.
+  bool? _filmLocated;
 
   final ScrollController _scroll = ScrollController();
 
   @override
   void initState() {
     super.initState();
+    if (widget.expandRoots) {
+      for (final root in widget.roots) {
+        _opened.add(root.path);
+      }
+    }
     final focused = widget.focused;
     final highlighted = widget.highlighted;
     if (focused != null) {
@@ -337,6 +510,11 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
     super.didUpdateWidget(oldWidget);
     final focused = widget.focused;
     final highlighted = widget.highlighted;
+    if (widget.expandRoots) {
+      for (final root in widget.roots) {
+        _opened.add(root.path);
+      }
+    }
     if (focused != null && focused != oldWidget.focused) {
       // An album was clicked: it opens, and the others fold away.
       _reveal(focused, openTarget: true);
@@ -351,8 +529,56 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
     super.dispose();
   }
 
-  bool _isOpen(AlbumFolderNode node) =>
-      (node.depth < 1) != _flipped.contains(node.path);
+  bool _isOpen(AlbumFolderNode node) => _opened.contains(node.path);
+
+  bool _isFilmPath(String path) {
+    final normal = p.normalize(path);
+    for (final root in widget.filmPaths) {
+      final film = p.normalize(root);
+      if (normal == film || p.isWithin(film, normal)) return true;
+    }
+    return false;
+  }
+
+  Offset _menuOrigin() {
+    final box = context.findRenderObject();
+    if (box is! RenderBox) return Offset.zero;
+    return box.localToGlobal(Offset.zero);
+  }
+
+  Future<void> _filmKindMenu(
+    AlbumFilmKind kind,
+    Offset position,
+    bool located,
+  ) async {
+    final choice = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        position.dx,
+        position.dy,
+        position.dx,
+        position.dy,
+      ),
+      items: [
+        if (widget.onAssignFilmKind != null)
+          const PopupMenuItem(value: 'set', child: Text('Set folder…')),
+        if (located && widget.onClearFilmKind != null)
+          const PopupMenuItem(value: 'clear', child: Text('Clear folder')),
+      ],
+    );
+    if (!mounted || choice == null) return;
+    switch (choice) {
+      case 'set':
+        widget.onAssignFilmKind?.call(kind);
+      case 'clear':
+        widget.onClearFilmKind?.call(kind);
+    }
+  }
+
+  void _openFilmHeader(AlbumFolderNode node) {
+    if (node.children.isNotEmpty) _toggleOpen(node);
+    widget.onFilmHeader?.call(node.path);
+  }
 
   /// Narrows the album to [node], or widens it again when it is the one.
   void _focus(AlbumFolderNode node, AlbumFolderState state) {
@@ -370,6 +596,7 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
       widget.onRenameFolder != null ||
       widget.onRevealFolder != null ||
       widget.onImportFolder != null ||
+      widget.onFolderMeta != null ||
       (widget.onDeleteFolder != null && node.depth > 0);
 
   /// The folder's menu, opened by a right click, a long press or the button
@@ -381,7 +608,10 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
   ) async {
     final scheme = Theme.of(context).colorScheme;
     final focused = node.path == widget.focused;
-    final canDelete = widget.onDeleteFolder != null && node.depth > 0;
+    final canDelete =
+        widget.onDeleteFolder != null &&
+        node.depth > 0 &&
+        !_isFilmPath(node.path);
     final choice = await showMenu<_FolderAction>(
       context: context,
       position: RelativeRect.fromLTRB(
@@ -415,7 +645,17 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
               title: Text('Show in Explorer'),
             ),
           ),
-        if (widget.onImportFolder != null)
+        if (widget.onFolderMeta != null && _isFilmPath(node.path))
+          const PopupMenuItem(
+            value: _FolderAction.meta,
+            child: ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.edit_note_outlined),
+              title: Text('Metadata…'),
+            ),
+          ),
+        if (widget.onImportFolder != null && !_isFilmPath(node.path))
           const PopupMenuItem(
             value: _FolderAction.import,
             child: ListTile(
@@ -425,7 +665,7 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
               title: Text('Import from camera…'),
             ),
           ),
-        if (widget.onRenameFolder != null)
+        if (widget.onRenameFolder != null && !_isFilmPath(node.path))
           const PopupMenuItem(
             value: _FolderAction.rename,
             child: ListTile(
@@ -462,6 +702,8 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
         _focus(node, state);
       case _FolderAction.reveal:
         widget.onRevealFolder!(node);
+      case _FolderAction.meta:
+        widget.onFolderMeta!(node);
       case _FolderAction.import:
         widget.onImportFolder!(node);
       case _FolderAction.rename:
@@ -509,8 +751,9 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
 
     void closeOthers(AlbumFolderNode folder) {
       for (final child in folder.children) {
-        // Folders below a source start closed, so a flipped one is open.
-        if (!inAlbum(child.path) && _isOpen(child)) _flipped.remove(child.path);
+        if (!inAlbum(child.path) && _isOpen(child)) {
+          _opened.remove(child.path);
+        }
         closeOthers(child);
       }
     }
@@ -518,12 +761,10 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
     widget.roots.forEach(closeOthers);
 
     for (final ancestor in above) {
-      if (!_isOpen(ancestor)) {
-        if (!_flipped.remove(ancestor.path)) _flipped.add(ancestor.path);
-      }
+      _opened.add(ancestor.path);
     }
-    if (openTarget && node.children.isNotEmpty && !_isOpen(node)) {
-      _flipped.add(node.path);
+    if (openTarget && node.children.isNotEmpty) {
+      _opened.add(node.path);
     }
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollTo(target));
   }
@@ -553,7 +794,7 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
 
   void _toggleOpen(AlbumFolderNode node) {
     setState(() {
-      if (!_flipped.remove(node.path)) _flipped.add(node.path);
+      if (!_opened.remove(node.path)) _opened.add(node.path);
     });
   }
 
@@ -585,6 +826,176 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
     };
   }
 
+  Widget _filmList(ThemeData theme, ColorScheme scheme) {
+    final locatedCount = widget.filmKinds
+        .where((kind) => widget.locatedFilmKeys.contains(kind.iconKey))
+        .length;
+    final showLocated = _filmLocated ?? locatedCount > 0;
+    final kinds = [
+      for (final kind in widget.filmKinds)
+        if (widget.locatedFilmKeys.contains(kind.iconKey) == showLocated) kind,
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+          child: SegmentedButton<bool>(
+            expandedInsets: EdgeInsets.zero,
+            showSelectedIcon: false,
+            style: SegmentedButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              textStyle: theme.textTheme.labelMedium,
+            ),
+            segments: [
+              ButtonSegment(value: true, label: Text('Located $locatedCount')),
+              ButtonSegment(
+                value: false,
+                label: Text(
+                  'No location ${widget.filmKinds.length - locatedCount}',
+                ),
+              ),
+            ],
+            selected: {showLocated},
+            onSelectionChanged: (next) {
+              setState(() => _filmLocated = next.first);
+            },
+          ),
+        ),
+        if (widget.onPickFilmLibrary != null)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              onPressed: widget.onPickFilmLibrary,
+              child: Text(
+                widget.filmLibraryChosen ? 'Change' : 'Choose folder',
+              ),
+            ),
+          ),
+        Expanded(
+          child: kinds.isEmpty
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Text(
+                      showLocated
+                          ? 'No film has a folder yet.'
+                          : 'Every film has a folder.',
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                  itemCount: kinds.length,
+                  itemBuilder: (context, index) {
+                    final kind = kinds[index];
+                    final marked = kind.iconKey == widget.selectedFilmKey;
+                    final located = widget.locatedFilmKeys.contains(
+                      kind.iconKey,
+                    );
+                    return Column(
+                      children: [
+                        Material(
+                          color: marked
+                              ? scheme.secondaryContainer
+                              : Colors.transparent,
+                          borderRadius: BorderRadius.circular(8),
+                          clipBehavior: Clip.antiAlias,
+                          child: InkWell(
+                            onTap: widget.onFilmKindTap == null
+                                ? null
+                                : () => widget.onFilmKindTap!(kind),
+                            onSecondaryTapUp:
+                                widget.onAssignFilmKind == null &&
+                                    widget.onClearFilmKind == null
+                                ? null
+                                : (details) => _filmKindMenu(
+                                    kind,
+                                    details.globalPosition,
+                                    located,
+                                  ),
+                            onLongPress:
+                                widget.onAssignFilmKind == null &&
+                                    widget.onClearFilmKind == null
+                                ? null
+                                : () => _filmKindMenu(
+                                    kind,
+                                    _menuOrigin(),
+                                    located,
+                                  ),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 4,
+                                vertical: 4,
+                              ),
+                              child: Row(
+                                children: [
+                                  SizedBox(
+                                    width: 40,
+                                    height: 40,
+                                    child: AlbumFilmIcon(
+                                      asset: kind.iconAsset,
+                                      name: kind.name,
+                                      marked: marked,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          kind.name,
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: theme.textTheme.bodyMedium
+                                              ?.copyWith(
+                                                color: marked
+                                                    ? scheme
+                                                          .onSecondaryContainer
+                                                    : null,
+                                                fontWeight: marked
+                                                    ? FontWeight.w700
+                                                    : null,
+                                              ),
+                                        ),
+                                        Text(
+                                          located
+                                              ? (widget.filmFolderLabels[kind
+                                                        .iconKey] ??
+                                                    kind.folderName)
+                                              : 'Right-click to set folder',
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: theme.textTheme.labelSmall
+                                              ?.copyWith(
+                                                color: located
+                                                    ? scheme.onSurfaceVariant
+                                                    : scheme.outline,
+                                              ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -609,7 +1020,7 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
               children: [
                 Expanded(
                   child: Text(
-                    'Folders',
+                    widget.heading,
                     style: theme.textTheme.titleMedium?.copyWith(
                       fontWeight: FontWeight.w700,
                     ),
@@ -620,6 +1031,30 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
                     onPressed: () => widget.onChanged(const {}),
                     child: const Text('Show all'),
                   ),
+                IconButton(
+                  tooltip: 'Film list',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const AlbumFilmListPage(),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.movie_creation_outlined),
+                ),
+                IconButton(
+                  tooltip: 'Cameras',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const AlbumGearPage(),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.photo_camera_outlined),
+                ),
                 if (widget.onAddFolder != null)
                   IconButton(
                     tooltip: 'Add folder',
@@ -662,66 +1097,87 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
               ],
             ),
           ),
-          Divider(
-            height: 1,
-            color: scheme.outlineVariant.withValues(alpha: 0.6),
-          ),
-          Expanded(
-            child:
-                (widget.roots.isEmpty ||
-                    // A lone folder with nothing to expand is not worth a tree,
-                    // unless its row is how it gets removed.
-                    (widget.roots.length == 1 &&
-                        widget.roots.single.children.isEmpty &&
-                        widget.onRemoveFolder == null &&
-                        widget.onImportFolder == null &&
-                        !widget.loading))
-                ? Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Text(
-                      widget.roots.isEmpty
-                          ? 'No folders yet.'
-                          : 'No subfolders with photos.',
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: scheme.onSurfaceVariant,
-                      ),
-                    ),
-                  )
-                : ListView.builder(
-                    controller: _scroll,
-                    padding: const EdgeInsets.symmetric(vertical: 6),
-                    itemExtent: _FolderRow.heightFor(context),
-                    itemCount: rows.length,
-                    itemBuilder: (context, index) {
-                      final node = rows[index];
-                      final state = states[node.path]!;
-                      final remove = widget.onRemoveFolder;
-                      return _FolderRow(
-                        node: node,
-                        label: labels[node.path] ?? node.name,
-                        reserveRemove: remove != null,
-                        onRemove: node.depth == 0 && remove != null
-                            ? () => remove(node.path)
-                            : null,
-                        state: state,
-                        highlighted: node.path == widget.highlighted,
-                        onTap: widget.onFocus == null
-                            ? null
-                            : () => _focus(node, state),
-                        onMenu: _hasMenu(node)
-                            ? (position) => _showMenu(node, state, position)
-                            : null,
-                        open: _isOpen(node),
-                        onToggleOpen: node.children.isEmpty
-                            ? null
-                            : () => _toggleOpen(node),
-                        onToggleChecked: () => widget.onChanged(
-                          albumToggleFolder(node, widget.excluded, state),
+          if (widget.filmKinds.isNotEmpty)
+            Expanded(child: _filmList(theme, scheme))
+          else if (widget.onPickFilmLibrary != null)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton(
+                onPressed: widget.onPickFilmLibrary,
+                child: const Text('Choose folder'),
+              ),
+            ),
+          if (widget.showFolderTree) ...[
+            Divider(
+              height: 1,
+              color: scheme.outlineVariant.withValues(alpha: 0.6),
+            ),
+            Expanded(
+              child:
+                  (widget.roots.isEmpty ||
+                      // A lone folder with nothing to expand is not worth a tree,
+                      // unless its row is how it gets removed.
+                      (widget.roots.length == 1 &&
+                          !widget.roots.single.filmHeader &&
+                          widget.roots.single.children.isEmpty &&
+                          widget.onRemoveFolder == null &&
+                          widget.onImportFolder == null &&
+                          !widget.loading))
+                  ? Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text(
+                        widget.roots.isEmpty
+                            ? 'No folders yet.'
+                            : 'No subfolders with photos.',
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: scheme.onSurfaceVariant,
                         ),
-                      );
-                    },
-                  ),
-          ),
+                      ),
+                    )
+                  : ListView.builder(
+                      controller: _scroll,
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      itemExtent: _FolderRow.heightFor(context),
+                      itemCount: rows.length,
+                      itemBuilder: (context, index) {
+                        final node = rows[index];
+                        final state = states[node.path]!;
+                        final remove = widget.onRemoveFolder;
+                        final marked = widget.highlighted ?? widget.focused;
+                        return _FolderRow(
+                          node: node,
+                          label: labels[node.path] ?? node.name,
+                          reserveRemove: remove != null,
+                          onRemove:
+                              node.depth == 0 &&
+                                  remove != null &&
+                                  !node.filmHeader
+                              ? () => remove(node.path)
+                              : null,
+                          state: state,
+                          highlighted: node.path == marked,
+                          onTap: node.filmHeader
+                              ? () => _openFilmHeader(node)
+                              : widget.onFocus == null
+                              ? null
+                              : () => _focus(node, state),
+                          onMenu: _hasMenu(node)
+                              ? (position) => _showMenu(node, state, position)
+                              : null,
+                          open: _isOpen(node),
+                          onToggleOpen: node.children.isEmpty
+                              ? null
+                              : node.filmHeader
+                              ? () => _openFilmHeader(node)
+                              : () => _toggleOpen(node),
+                          onToggleChecked: () => widget.onChanged(
+                            albumToggleFolder(node, widget.excluded, state),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
         ],
       ),
     );
@@ -772,7 +1228,7 @@ class _FolderRow extends StatelessWidget {
 
   final AlbumFolderState state;
 
-  /// Whether this is the folder of the photo open in the preview. It is the\r\n  /// only thing a row is marked for.
+  /// Whether this row is the one the tree is marking.
   final bool highlighted;
 
   /// What a click on the row does. Null ticks the box.
@@ -802,8 +1258,8 @@ class _FolderRow extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 4),
         child: Material(
-          // Only the folder of the photo open in the preview is shaded,
-          // rounded in from the panel's edges. The waterfall marks none.
+          // The open photo's folder, or the album the grid is narrowed to.
+          // Rounded in from the panel's edges.
           color: fill,
           borderRadius: BorderRadius.circular(8),
           clipBehavior: Clip.antiAlias,
@@ -838,25 +1294,40 @@ class _FolderRow extends StatelessWidget {
                               ),
                             ),
                     ),
-                    Checkbox(
-                      value: switch (state) {
-                        AlbumFolderState.included => true,
-                        AlbumFolderState.excluded => false,
-                        AlbumFolderState.partial => null,
-                      },
-                      tristate: true,
-                      visualDensity: VisualDensity.compact,
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      onChanged: (_) => onToggleChecked(),
-                    ),
-                    const SizedBox(width: 4),
-                    Icon(
-                      hidden
-                          ? Icons.folder_off_outlined
-                          : Icons.folder_outlined,
-                      size: 20,
-                      color: hidden ? scheme.outline : scheme.onSurfaceVariant,
-                    ),
+                    if (!node.filmHeader) ...[
+                      Checkbox(
+                        value: switch (state) {
+                          AlbumFolderState.included => true,
+                          AlbumFolderState.excluded => false,
+                          AlbumFolderState.partial => null,
+                        },
+                        tristate: true,
+                        visualDensity: VisualDensity.compact,
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        onChanged: (_) => onToggleChecked(),
+                      ),
+                      const SizedBox(width: 4),
+                    ],
+                    if (node.filmHeader)
+                      SizedBox(
+                        width: 32,
+                        height: 32,
+                        child: AlbumFilmIcon(
+                          asset: node.filmIcon,
+                          name: node.name,
+                          marked: highlighted,
+                        ),
+                      )
+                    else
+                      Icon(
+                        hidden
+                            ? Icons.folder_off_outlined
+                            : Icons.folder_outlined,
+                        size: 20,
+                        color: hidden
+                            ? scheme.outline
+                            : scheme.onSurfaceVariant,
+                      ),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Tooltip(

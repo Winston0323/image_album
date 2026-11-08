@@ -155,6 +155,7 @@ void main() {
   });
 
   testWidgets('shows the cache and can clear it', (tester) async {
+    wide(tester);
     await saveSources(tester, 1);
     await tester.pumpWidget(DemoApp(libraryDirectory: libraryDir()));
     await _settle(tester);
@@ -163,8 +164,23 @@ void main() {
     await _settle(tester);
     expect(find.textContaining('0 thumbnails'), findsOneWidget);
 
+    await tester.ensureVisible(find.text('Clear cache'));
     await tester.tap(find.text('Clear cache'));
-    await _settle(tester);
+    await _until(tester, find.text('Cache cleared.'));
     expect(find.text('Cache cleared.'), findsOneWidget);
+  });
+
+  testWidgets('regenerates the cache from the dialog', (tester) async {
+    wide(tester);
+    await saveSources(tester, 1);
+    await tester.pumpWidget(DemoApp(libraryDirectory: libraryDir()));
+    await _settle(tester);
+
+    await tester.tap(find.byTooltip('Cache'));
+    await _settle(tester);
+    await tester.ensureVisible(find.text('Regenerate'));
+    await tester.tap(find.text('Regenerate'));
+    await _until(tester, find.textContaining('Cache regenerated'));
+    expect(find.textContaining('Cache regenerated'), findsOneWidget);
   });
 }

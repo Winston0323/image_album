@@ -280,7 +280,18 @@ void main() {
       await tester.pumpWidget(host(sources, recursive: true));
       await settle(tester);
 
-      // Beta's tree starts open, with Deep in it. Hide just that.
+      // Source rows start collapsed. Open Beta so Deep is on the tree.
+      await tester.tap(
+        find.descendant(
+          of: find.ancestor(
+            of: find.text('Beta'),
+            matching: find.byType(InkWell),
+          ),
+          matching: find.byIcon(Icons.chevron_right_rounded),
+        ),
+      );
+      await tester.pump();
+
       await tester.tap(
         find.descendant(
           of: find.ancestor(

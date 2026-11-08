@@ -1,8 +1,10 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/gestures.dart' show kSecondaryMouseButton;
+import 'package:flutter/gestures.dart'
+    show PointerDeviceKind, kSecondaryMouseButton;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image_album/image_album.dart';
 import 'package:image_album/src/album_camera.dart';
@@ -308,6 +310,44 @@ void main() {
       expect(result.stopped, isTrue);
       expect(result.copied, 1);
     });
+
+    test('deletes the chosen files without copying them', () async {
+      final shot = pair();
+
+      final result = await albumDeleteShots(
+        shots: [shot],
+        kind: AlbumImportKind.raw,
+      );
+
+      expect(result.copied, 0);
+      expect(result.deleted, 1);
+      expect(result.errors, isEmpty);
+      expect(shot.raw!.file.existsSync(), isFalse);
+      expect(shot.picture!.file.existsSync(), isTrue);
+    });
+
+    test('reports bytes and a transfer speed while copying', () async {
+      final shot = pair();
+      final updates = <AlbumCopyProgress>[];
+
+      await albumCopyShots(
+        shots: [shot],
+        kind: AlbumImportKind.both,
+        destination: p.join(root.path, 'out'),
+        onProgress: updates.add,
+      );
+
+      expect(updates, isNotEmpty);
+      expect(updates.first.done, 0);
+      expect(updates.first.total, 2);
+      expect(updates.first.bytesTotal, _png.length + 4);
+      expect(updates.last.done, 2);
+      expect(updates.last.bytesDone, updates.last.bytesTotal);
+      expect(
+        updates.any((p) => p.bytesPerSecond != null && p.bytesPerSecond! > 0),
+        isTrue,
+      );
+    });
   });
 
   group('importing from the folder menu', () {
@@ -424,8 +464,89 @@ void main() {
       expect(find.text('Import into "Holiday"'), findsOneWidget);
       expect(find.textContaining('2 cards'), findsOneWidget);
       expect(find.textContaining('1 with both'), findsOneWidget);
-      // The pair is one tile, and the lone JPEG another.
+      // The pair is one tile, and the lone JPEG another. Nothing starts picked.
       expect(find.byType(AlbumPhotoTile), findsNWidgets(2));
+      expect(
+        tester
+            .widgetList<AlbumPhotoTile>(find.byType(AlbumPhotoTile))
+            .every((tile) => !tile.selected),
+        isTrue,
+      );
+      expect(find.text('Import 0'), findsOneWidget);
+    });
+
+    Future<void> openImport(WidgetTester tester) async {
+      await open(tester);
+      await tester.tap(
+        find.text(p.basename(album.path)),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Import from camera…'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await waitUntilRead(tester);
+    }
+
+    Offset tileCenter(WidgetTester tester, int index) =>
+        tester.getCenter(find.byType(AlbumPhotoTile).at(index));
+
+    Future<void> withKeys(
+      WidgetTester tester,
+      List<LogicalKeyboardKey> keys,
+      Future<void> Function() body,
+    ) async {
+      for (final key in keys) {
+        await tester.sendKeyDownEvent(key);
+      }
+      await body();
+      for (final key in keys.reversed) {
+        await tester.sendKeyUpEvent(key);
+      }
+    }
+
+    testWidgets('shift and ctrl pick shots the same way as the album', (
+      tester,
+    ) async {
+      await openImport(tester);
+
+      await withKeys(tester, [LogicalKeyboardKey.controlLeft], () async {
+        await tester.tapAt(tileCenter(tester, 0));
+        await tester.pump();
+      });
+      expect(
+        tester
+            .widgetList<AlbumPhotoTile>(find.byType(AlbumPhotoTile))
+            .where((tile) => tile.selected)
+            .length,
+        1,
+      );
+
+      await withKeys(tester, [LogicalKeyboardKey.shiftLeft], () async {
+        await tester.tapAt(tileCenter(tester, 1));
+        await tester.pump();
+      });
+      expect(
+        tester
+            .widgetList<AlbumPhotoTile>(find.byType(AlbumPhotoTile))
+            .every((tile) => tile.selected),
+        isTrue,
+      );
+
+      final gesture = await tester.startGesture(
+        tileCenter(tester, 0),
+        kind: PointerDeviceKind.mouse,
+      );
+      await gesture.moveTo(tileCenter(tester, 1));
+      await gesture.up();
+      await tester.pump();
+      // Started on a picked tile, so the drag unpicks what it crosses.
+      expect(
+        tester
+            .widgetList<AlbumPhotoTile>(find.byType(AlbumPhotoTile))
+            .every((tile) => !tile.selected),
+        isTrue,
+      );
     });
 
     testWidgets('the preview lists the shot\'s files at its top right', (
@@ -460,6 +581,43 @@ void main() {
       expect(find.text('DSC0001.ARW'), findsOneWidget);
     });
 
+    testWidgets('deletes the chosen shots from the camera', (tester) async {
+      await openImport(tester);
+
+      await tester.tap(find.text('Select all'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('JPEG'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Delete 2 from the camera'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+      await settle(tester);
+      await tester.pumpAndSettle();
+
+      expect(
+        File(
+          p.join(cards.path, 'jpgcard', 'DCIM', '100MSDCF', 'DSC0001.JPG'),
+        ).existsSync(),
+        isFalse,
+      );
+      expect(
+        File(
+          p.join(cards.path, 'jpgcard', 'DCIM', '100MSDCF', 'DSC0002.JPG'),
+        ).existsSync(),
+        isFalse,
+      );
+      expect(
+        File(
+          p.join(cards.path, 'rawcard', 'DCIM', '100MSDCF', 'DSC0001.ARW'),
+        ).existsSync(),
+        isTrue,
+      );
+      // The pair still has its raw, so one tile remains; the lone JPEG is gone.
+      expect(find.byType(AlbumPhotoTile), findsOneWidget);
+      expect(find.textContaining('Removed 2'), findsOneWidget);
+    });
+
     testWidgets('copies the chosen kind into the new folder', (tester) async {
       await open(tester);
       await tester.tap(
@@ -474,6 +632,8 @@ void main() {
       await waitUntilRead(tester);
 
       await tester.tap(find.text('RAW'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Select all'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Delete from the camera after copying'));
       await tester.pumpAndSettle();

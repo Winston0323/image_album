@@ -271,6 +271,18 @@ void main() {
       }
     }
 
+    /// Opens the source row so the albums under it are visible. The tree
+    /// starts collapsed.
+    Future<void> expandRoot(WidgetTester tester) async {
+      final chevron = find.descendant(
+        of: find.byType(AlbumFolderPanel),
+        matching: find.byIcon(Icons.chevron_right_rounded),
+      );
+      if (chevron.evaluate().isEmpty) return;
+      await tester.tap(chevron.first);
+      await tester.pumpAndSettle();
+    }
+
     /// The checkbox on the row of the folder called [name].
     Finder checkboxOf(String name) => find.descendant(
       of: find.ancestor(of: find.text(name), matching: find.byType(InkWell)),
@@ -303,9 +315,14 @@ void main() {
       await settle(tester);
 
       expect(find.text('Folders'), findsOneWidget);
+      // The source starts collapsed: albums are hidden until it is opened.
+      expect(find.text('Pets'), findsNothing);
+      expect(find.text('Trips'), findsNothing);
+
+      await expandRoot(tester);
       expect(find.text('Pets'), findsOneWidget);
       expect(find.text('Trips'), findsOneWidget);
-      // Only the album's own folder is open at first.
+      // Albums stay collapsed: Paris is under Trips.
       expect(find.text('Paris'), findsNothing);
       expect(find.byType(Image), findsNWidgets(4));
     });
@@ -318,7 +335,7 @@ void main() {
       await tester.pumpWidget(app());
       await settle(tester);
 
-      final bar = tester.getRect(find.byTooltip('Folders'));
+      final bar = tester.getRect(find.byTooltip('Digital'));
       final panel = tester.getRect(find.byType(AlbumFolderPanel));
       expect(panel.left, bar.right);
       expect(panel.width, 300);
@@ -342,7 +359,7 @@ void main() {
 
       // Part way: still there, but its edge has moved in from where it was.
       // The panel keeps its width and is clipped, so it is the edge that moves.
-      final barRight = tester.getRect(find.byTooltip('Folders')).right;
+      final barRight = tester.getRect(find.byTooltip('Digital')).right;
       final edge = tester.getRect(find.byType(AlbumFolderPanel)).right;
       expect(edge, inExclusiveRange(barRight, barRight + 300));
 
@@ -350,14 +367,14 @@ void main() {
       expect(find.byType(AlbumFolderPanel), findsNothing);
 
       // And it comes back the same way from the bar.
-      await tester.tap(find.byTooltip('Folders'));
+      await tester.tap(find.byTooltip('Digital'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
       expect(find.byType(AlbumFolderPanel), findsOneWidget);
       await tester.pumpAndSettle();
       expect(
         tester.getRect(find.byType(AlbumFolderPanel)).right,
-        tester.getRect(find.byTooltip('Folders')).right + 300,
+        tester.getRect(find.byTooltip('Digital')).right + 300,
       );
     });
 
@@ -395,7 +412,7 @@ void main() {
       expect(find.byType(AlbumPreviewPage), findsOneWidget);
       expect(
         tester.getRect(find.byType(AlbumPreviewPage)).left,
-        tester.getRect(find.byTooltip('Folders')).right,
+        tester.getRect(find.byTooltip('Digital')).right,
       );
     });
 
@@ -417,7 +434,7 @@ void main() {
       expect(find.byType(AlbumFolderPanel), findsOneWidget);
       final panel = tester.getRect(find.byType(AlbumFolderPanel));
       final viewer = tester.getRect(find.byType(AlbumPreviewPage));
-      expect(panel.left, tester.getRect(find.byTooltip('Folders')).right);
+      expect(panel.left, tester.getRect(find.byTooltip('Digital')).right);
       expect(viewer.left, greaterThanOrEqualTo(panel.right));
       expect(viewer.right, 1200);
 
@@ -461,6 +478,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         await openMenu(tester, 'Pets');
 
@@ -475,6 +493,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         await tester.tap(find.byTooltip('Folder options').at(1));
         await tester.pumpAndSettle();
@@ -487,6 +506,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         await tester.longPress(find.text('Pets'));
         await tester.pumpAndSettle();
@@ -501,6 +521,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         await openMenu(tester, p.basename(temp.path));
 
@@ -513,6 +534,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         await openMenu(tester, 'Pets');
         await tester.tap(find.text('Show only this folder'));
@@ -532,6 +554,7 @@ void main() {
         final asked = <(String, int)>[];
         await tester.pumpWidget(withConfirm(asked, answer: false));
         await settle(tester);
+        await expandRoot(tester);
 
         await openMenu(tester, 'Pets');
         await tester.tap(find.text('Delete folder…'));
@@ -548,6 +571,7 @@ void main() {
         final asked = <(String, int)>[];
         await tester.pumpWidget(withConfirm(asked));
         await settle(tester);
+        await expandRoot(tester);
 
         await openMenu(tester, 'Pets');
         await tester.tap(find.text('Delete folder…'));
@@ -567,6 +591,7 @@ void main() {
         final asked = <(String, int)>[];
         await tester.pumpWidget(withConfirm(asked));
         await settle(tester);
+        await expandRoot(tester);
 
         await openMenu(tester, 'Trips');
         await tester.tap(find.text('Delete folder…'));
@@ -586,6 +611,7 @@ void main() {
         );
         await tester.pumpWidget(withConfirm([]));
         await settle(tester);
+        await expandRoot(tester);
 
         await openMenu(tester, 'Pets');
         await tester.tap(find.text('Delete folder…'));
@@ -618,6 +644,7 @@ void main() {
           ),
         );
         await settle(tester);
+        await expandRoot(tester);
 
         await openMenu(tester, 'Pets');
         await tester.tap(find.text('Show in Explorer'));
@@ -642,6 +669,7 @@ void main() {
           ),
         );
         await settle(tester);
+        await expandRoot(tester);
 
         await openMenu(tester, p.basename(temp.path));
         await tester.tap(find.text('Show in Explorer'));
@@ -664,6 +692,7 @@ void main() {
           ),
         );
         await settle(tester);
+        await expandRoot(tester);
 
         await openMenu(tester, 'Pets');
         await tester.tap(find.text('Show in Explorer'));
@@ -683,6 +712,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         await openMenu(tester, 'Pets');
         expect(find.text('Rename images…'), findsOneWidget);
@@ -711,6 +741,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         await openMenu(tester, 'Pets');
         await tester.tap(find.text('Rename images…'));
@@ -728,6 +759,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         // Trips holds nothing itself, only Paris with one photo.
         await openMenu(tester, 'Trips');
@@ -774,6 +806,7 @@ void main() {
         });
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         await openMenu(tester, 'Pets');
         await tester.tap(find.text('Rename images…'));
@@ -795,6 +828,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(withConfirm([]));
         await settle(tester);
+        await expandRoot(tester);
         await tester.tap(find.text('Pets'));
         await tester.pumpAndSettle();
 
@@ -809,9 +843,8 @@ void main() {
     });
 
     group('narrowing the album to one folder', () {
-      /// Whether the row of [name] is filled with any colour. The waterfall
-      /// marks no folder, so while narrowed none ever is; the chip names the
-      /// folder instead.
+      /// Whether the row of [name] is filled with any colour. Clicking an
+      /// album shades that folder; a photo shades its own folder instead.
       bool filled(WidgetTester tester, String name) {
         final scheme = Theme.of(
           tester.element(find.byType(AlbumFolderPanel)),
@@ -837,13 +870,14 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
         expect(chip(), findsNothing);
 
         await tester.tap(find.text('Pets'));
         await tester.pumpAndSettle();
 
         expect(find.byType(Image), findsNWidgets(2));
-        expect(filled(tester, 'Pets'), isFalse);
+        expect(filled(tester, 'Pets'), isTrue);
         expect(filled(tester, 'Trips'), isFalse);
         // The rest is set aside, not hidden: no checkbox changed.
         expect(find.text('2 photos'), findsOneWidget);
@@ -857,6 +891,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         await tester.tap(find.text('Trips'));
         await tester.pumpAndSettle();
@@ -868,6 +903,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
         await tester.tap(find.text('Pets'));
         await tester.pumpAndSettle();
 
@@ -884,6 +920,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
         await tester.tap(find.text('Pets'));
         await tester.pumpAndSettle();
 
@@ -899,6 +936,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         await tester.tap(find.text('Pets'));
         await tester.pumpAndSettle();
@@ -914,6 +952,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         await tester.tap(find.text('Pets'));
         await tester.pumpAndSettle();
@@ -921,7 +960,7 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.byType(Image), findsNWidgets(1));
-        expect(filled(tester, 'Trips'), isFalse);
+        expect(filled(tester, 'Trips'), isTrue);
         expect(filled(tester, 'Pets'), isFalse);
       });
 
@@ -930,6 +969,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
         await tester.tap(find.text('Pets'));
         await tester.pumpAndSettle();
 
@@ -945,6 +985,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         // Narrowed to the source's root nothing changes; narrowed to Pets the
         // two photos are all there is to page through.
@@ -968,13 +1009,14 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app(excluded: {p.join(temp.path, 'Pets')}));
         await settle(tester);
+        await expandRoot(tester);
         expect(find.byType(Image), findsNWidgets(2));
 
         await tester.tap(find.text('Pets'));
         await tester.pumpAndSettle();
 
         expect(find.byType(Image), findsNWidgets(2));
-        expect(filled(tester, 'Pets'), isFalse);
+        expect(filled(tester, 'Pets'), isTrue);
         expect(find.text('4 photos'), findsOneWidget);
       });
 
@@ -985,6 +1027,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
         await tester.tap(find.text('Pets'));
         await tester.pumpAndSettle();
 
@@ -1003,12 +1046,14 @@ void main() {
           await tester.pumpWidget(app());
           await settle(tester);
 
-          await tester.tap(find.byTooltip('Folders'));
+          await tester.tap(find.byTooltip('Digital'));
           await tester.pumpAndSettle();
+          await expandRoot(tester);
           await tester.tap(find.text('Pets'));
           await tester.pumpAndSettle();
 
-          expect(find.text('Folders'), findsOneWidget);
+          // The sheet closes so the album is what is on screen.
+          expect(find.text('Folders'), findsNothing);
           expect(find.byType(Image), findsNWidgets(2));
           expect(chip(), findsOneWidget);
         },
@@ -1116,6 +1161,7 @@ void main() {
         await populateDeeper(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
         expect(find.text('Cats'), findsNothing);
 
         await tester.tap(find.text('Pets'));
@@ -1131,6 +1177,7 @@ void main() {
         await populateDeeper(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         await tester.tap(find.text('Pets'));
         await tester.pumpAndSettle();
@@ -1152,6 +1199,7 @@ void main() {
         await populateDeeper(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         await tester.tap(find.text('Trips'));
         await tester.pumpAndSettle();
@@ -1171,6 +1219,7 @@ void main() {
         await populateDeeper(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         await tester.tap(find.text('Trips'));
         await tester.pumpAndSettle();
@@ -1217,6 +1266,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         // Nothing is marked before a click.
         expect(marked(tester, 'Pets'), isFalse);
@@ -1258,6 +1308,7 @@ void main() {
         });
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         // Newest first: root, Pets/a, Pets/b, Trips/Paris/p, Pets/Cats/c.
         await open(tester, 1);
@@ -1278,6 +1329,7 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
         await open(tester, 1);
         expect(marked(tester, 'Pets'), isTrue);
@@ -1306,7 +1358,7 @@ void main() {
         expect(find.byType(AlbumPreviewPage), findsNothing);
 
         // The tree, opened from the bar, has nothing marked.
-        await tester.tap(find.byTooltip('Folders'));
+        await tester.tap(find.byTooltip('Digital'));
         await tester.pumpAndSettle();
         expect(marked(tester, 'Pets'), isFalse);
       });
@@ -1333,13 +1385,14 @@ void main() {
         await populate(tester);
         await tester.pumpWidget(app());
         await settle(tester);
+        await expandRoot(tester);
 
-        // Narrowed to Trips, whose one photo is in Paris below it: the album
-        // is cut down, and no row is marked for it.
+        // Narrowed to Trips, whose one photo is in Paris below it: that
+        // album's row is the one marked.
         await tester.tap(find.text('Trips'));
         await tester.pumpAndSettle();
         expect(find.byType(Image), findsNWidgets(1));
-        expect(marked(tester, 'Trips'), isFalse);
+        expect(marked(tester, 'Trips'), isTrue);
         expect(marked(tester, 'Paris'), isFalse);
 
         // A photo open in the preview marks its folder, and only that one.
@@ -1348,12 +1401,13 @@ void main() {
         expect(marked(tester, 'Paris'), isTrue);
         expect(marked(tester, 'Trips'), isFalse);
 
-        // Back on the waterfall every mark is gone.
+        // The photo is closed; the album is still narrowed, so its folder
+        // stays marked.
         await tester.sendKeyEvent(LogicalKeyboardKey.escape);
         await tester.pumpAndSettle();
         expect(find.byType(AlbumPreviewPage), findsNothing);
         expect(marked(tester, 'Paris'), isFalse);
-        expect(marked(tester, 'Trips'), isFalse);
+        expect(marked(tester, 'Trips'), isTrue);
       });
     });
 
@@ -1365,6 +1419,7 @@ void main() {
       final reported = <Set<String>>[];
       await tester.pumpWidget(app(onChanged: reported.add));
       await settle(tester);
+      await expandRoot(tester);
 
       await tester.tap(checkboxOf('Pets'));
       await tester.pump();
@@ -1399,8 +1454,10 @@ void main() {
       await tester.pumpWidget(app());
       await settle(tester);
 
-      await tester.tap(find.byIcon(Icons.chevron_right_rounded));
-      await tester.pump();
+      await expandRoot(tester);
+      // Trips is the album with a subfolder.
+      await tester.tap(find.text('Trips'));
+      await tester.pumpAndSettle();
 
       expect(find.text('Paris'), findsOneWidget);
     });
@@ -1428,8 +1485,9 @@ void main() {
 
       expect(find.text('Pets'), findsNothing);
 
-      await tester.tap(find.byTooltip('Folders'));
+      await tester.tap(find.byTooltip('Digital'));
       await tester.pumpAndSettle();
+      await expandRoot(tester);
       expect(find.text('Pets'), findsOneWidget);
 
       await tester.tap(checkboxOf('Pets'));
@@ -1460,6 +1518,7 @@ void main() {
         ),
       );
       await settle(tester);
+      await expandRoot(tester);
 
       // Nothing overflowed while laying out, and the rows are taller than at
       // the default size, with room for the larger name.
@@ -1484,7 +1543,7 @@ void main() {
       await tester.pumpWidget(app(recursive: false));
       await settle(tester);
 
-      expect(find.byTooltip('Folders'), findsNothing);
+      expect(find.byTooltip('Digital'), findsNothing);
       expect(find.text('Folders'), findsNothing);
       expect(find.byType(Image), findsOneWidget);
     });

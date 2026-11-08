@@ -1,6 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' show PointerDeviceKind;
 
+import 'package:flutter/gestures.dart'
+    show kBackMouseButton, kForwardMouseButton;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -186,6 +189,31 @@ void main() {
       expect(find.text('1 / 3'), findsOneWidget);
     });
 
+    testWidgets('mouse previous and next buttons move between photos', (
+      tester,
+    ) async {
+      await open(tester);
+      final at = tester.getCenter(find.byType(AlbumPreviewPage));
+
+      final next = await tester.createGesture(
+        kind: PointerDeviceKind.mouse,
+        buttons: kBackMouseButton,
+      );
+      await next.down(at);
+      await next.up();
+      await _frames(tester);
+      expect(find.text('2 / 3'), findsOneWidget);
+
+      final prev = await tester.createGesture(
+        kind: PointerDeviceKind.mouse,
+        buttons: kForwardMouseButton,
+      );
+      await prev.down(at);
+      await prev.up();
+      await _frames(tester);
+      expect(find.text('1 / 3'), findsOneWidget);
+    });
+
     testWidgets('Page Down and Page Up move forward and back', (tester) async {
       await open(tester);
 
@@ -220,10 +248,28 @@ void main() {
         tester.element(find.byType(AlbumPreviewPage)),
       ).colorScheme.primary;
 
+      Finder slide() =>
+          find.ancestor(of: strip(), matching: find.byType(AnimatedSlide));
+
+      /// Moves a mouse pointer into the bottom hot zone so the strip opens.
+      Future<TestGesture> reveal(WidgetTester tester) async {
+        final gesture = await tester.createGesture(
+          kind: PointerDeviceKind.mouse,
+        );
+        await gesture.addPointer(location: Offset.zero);
+        addTearDown(gesture.removePointer);
+        await tester.pump();
+        final box = tester.getRect(find.byType(AlbumPreviewPage));
+        await gesture.moveTo(Offset(box.center.dx, box.bottom - 16));
+        await _frames(tester);
+        return gesture;
+      }
+
       testWidgets('shows every photo, the current one highlighted', (
         tester,
       ) async {
         await open(tester);
+        await reveal(tester);
 
         expect(
           find.descendant(of: strip(), matching: find.byType(Image)),
@@ -240,6 +286,7 @@ void main() {
         tester,
       ) async {
         await open(tester);
+        await reveal(tester);
 
         await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
         await _frames(tester);
@@ -254,6 +301,7 @@ void main() {
 
       testWidgets('tapping a thumbnail moves to that photo', (tester) async {
         await open(tester);
+        await reveal(tester);
 
         await tester.tap(
           find.descendant(of: strip(), matching: find.byType(Image)).last,
@@ -264,20 +312,30 @@ void main() {
         expect(borders(tester).last, accent(tester));
       });
 
-      testWidgets('folds away with the bars, and comes back', (tester) async {
-        await open(tester);
-        Finder frame() =>
-            find.ancestor(of: strip(), matching: find.byType(ClipRect)).first;
-        expect(tester.getSize(frame()).height, greaterThan(60));
+      testWidgets(
+        'pops up near the bottom edge and hides when the pointer leaves',
+        (tester) async {
+          await open(tester);
+          expect(
+            tester.widget<AnimatedSlide>(slide()).offset,
+            const Offset(0, 1),
+          );
 
-        await tester.tapAt(const Offset(500, 300));
-        await _frames(tester);
-        expect(tester.getSize(frame()).height, 0);
+          final gesture = await reveal(tester);
+          expect(tester.widget<AnimatedSlide>(slide()).offset, Offset.zero);
 
-        await tester.tapAt(const Offset(500, 300));
-        await _frames(tester);
-        expect(tester.getSize(frame()).height, greaterThan(60));
-      });
+          // Photo keeps its full height; the strip overlays it.
+          final photoBefore = tester.getSize(find.byType(PageView));
+          final box = tester.getRect(find.byType(AlbumPreviewPage));
+          await gesture.moveTo(box.center);
+          await _frames(tester);
+          expect(
+            tester.widget<AnimatedSlide>(slide()).offset,
+            const Offset(0, 1),
+          );
+          expect(tester.getSize(find.byType(PageView)), photoBefore);
+        },
+      );
 
       testWidgets('is left out when there is only one photo', (tester) async {
         await open(tester, count: 1);
@@ -292,6 +350,61 @@ void main() {
       await tester.tap(find.byTooltip('Next photo'));
       await _frames(tester);
       expect(find.text('2 / 3'), findsOneWidget);
+    });
+
+    testWidgets('show in file explorer reveals the current photo', (
+      tester,
+    ) async {
+      AlbumPhoto? revealed;
+      final photos = await tester.runAsync(
+        () async => [
+          for (var i = 0; i < 2; i++)
+            await () async {
+              final file = File('${temp.path}/P$i.png');
+              await file.writeAsBytes(_onePixelPng);
+              return AlbumPhoto(
+                file: file,
+                takenAt: DateTime(2026, 7, 30, 12, i),
+              );
+            }(),
+        ],
+      );
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(1000, 700);
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => AlbumPreviewPage(
+                      photos: photos!,
+                      initialIndex: 0,
+                      onReveal: (photo) async => revealed = photo,
+                    ),
+                  ),
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await _frames(tester);
+
+      final reveal = find.byIcon(Icons.folder_open_rounded);
+      await tester.tap(reveal);
+      await tester.pump();
+      expect(revealed?.fileName, 'P0.png');
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await _frames(tester);
+      await tester.tap(reveal);
+      await tester.pump();
+      expect(revealed?.fileName, 'P1.png');
     });
 
     testWidgets('Escape closes the viewer', (tester) async {

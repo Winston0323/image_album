@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'album_images.dart';
 import 'album_library.dart';
 import 'album_photo.dart';
+import 'album_view.dart';
 
 const List<String> _monthNames = [
   'Jan',
@@ -64,11 +65,14 @@ const List<String> _weekdayNames = [
   };
 }
 
+/// "Jul 30, 2026", the date half of a film waterfall divider.
+String albumFullDate(DateTime day) =>
+    '${_monthNames[day.month - 1]} ${day.day}, ${day.year}';
+
 /// "Jul 30, 2026 · 12:05", for the line under a photo in the viewer.
 String albumShortDateTime(DateTime at) {
   String two(int n) => n.toString().padLeft(2, '0');
-  return '${_monthNames[at.month - 1]} ${at.day}, ${at.year}'
-      ' · ${two(at.hour)}:${two(at.minute)}';
+  return '${albumFullDate(at)} · ${two(at.hour)}:${two(at.minute)}';
 }
 
 /// "1,234" style grouping for counts of a thousand or more.
@@ -90,6 +94,9 @@ class AlbumDayHeaderDelegate extends SliverPersistentHeaderDelegate {
     this.height = baseHeight,
     this.selected,
     this.onSelect,
+    this.title,
+    this.subtitle,
+    this.onSubtitle,
   });
 
   final AlbumDaySection section;
@@ -100,6 +107,16 @@ class AlbumDayHeaderDelegate extends SliverPersistentHeaderDelegate {
 
   /// Picks or clears every photo from this day.
   final VoidCallback? onSelect;
+
+  /// Replaces the day name. A film roll uses the date, such as "Jul 30, 2026".
+  final String? title;
+
+  /// Replaces the day subtitle. A film roll uses the time, after the date.
+  final String? subtitle;
+
+  /// What a tap on [subtitle] does. Set for a film roll, whose format can be
+  /// changed. The day's own tap is left alone.
+  final VoidCallback? onSubtitle;
 
   /// Height of the heading at the default text size.
   static const double baseHeight = 48;
@@ -128,7 +145,10 @@ class AlbumDayHeaderDelegate extends SliverPersistentHeaderDelegate {
       oldDelegate.section != section ||
       oldDelegate.height != height ||
       oldDelegate.selected != selected ||
-      oldDelegate.onSelect != onSelect;
+      oldDelegate.onSelect != onSelect ||
+      oldDelegate.title != title ||
+      oldDelegate.subtitle != subtitle ||
+      oldDelegate.onSubtitle != onSubtitle;
 
   @override
   Widget build(
@@ -138,7 +158,9 @@ class AlbumDayHeaderDelegate extends SliverPersistentHeaderDelegate {
   ) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final labels = albumDayLabels(section.day);
+    final labels = title == null
+        ? albumDayLabels(section.day)
+        : (title: title!, subtitle: subtitle ?? '');
 
     // Persistent headers are laid out loosely, so the height is spelled out.
     // Otherwise the header would be as tall as its text, and the sliver's
@@ -147,6 +169,24 @@ class AlbumDayHeaderDelegate extends SliverPersistentHeaderDelegate {
       height: height,
       child: _buildContent(theme, scheme, labels, overlapsContent),
     );
+  }
+
+  Widget _subtitle(
+    ThemeData theme,
+    ColorScheme scheme,
+    ({String title, String subtitle}) labels,
+  ) {
+    final text = Text(
+      labels.subtitle,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: theme.textTheme.bodyMedium?.copyWith(
+        color: onSubtitle == null ? scheme.onSurfaceVariant : scheme.primary,
+      ),
+    );
+    final tap = onSubtitle;
+    if (tap == null) return text;
+    return GestureDetector(onTap: tap, child: text);
   }
 
   Widget _buildContent(
@@ -201,16 +241,7 @@ class AlbumDayHeaderDelegate extends SliverPersistentHeaderDelegate {
                           ),
                         ),
                         const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            labels.subtitle,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              color: scheme.onSurfaceVariant,
-                            ),
-                          ),
-                        ),
+                        Expanded(child: _subtitle(theme, scheme, labels)),
                         DecoratedBox(
                           decoration: BoxDecoration(
                             color: scheme.surfaceContainerHighest,
@@ -259,6 +290,8 @@ class AlbumPhotoTile extends StatefulWidget {
     required this.onTap,
     required this.onToggle,
     this.onLongPress,
+    this.selectable = true,
+    this.adjustment = const AlbumViewAdjustment(),
     this.library,
   });
 
@@ -271,8 +304,17 @@ class AlbumPhotoTile extends StatefulWidget {
   /// check marker, not just the selected ones, so the mode is visible.
   final bool selecting;
 
+  /// Whether this tile can be picked. When false the check never appears.
+  final bool selectable;
+
+  /// How the picture is turned and cropped for display. The file is unchanged.
+  final AlbumViewAdjustment adjustment;
+
   final bool selected;
-  final VoidCallback onTap;
+
+  /// Opens or otherwise handles a tap. [origin] is this tile's global bounds,
+  /// used to zoom the preview out of the tile.
+  final void Function(Rect? origin) onTap;
 
   /// Picks or unpicks this tile. Called by the badge, and by a long-press
   /// unless [onLongPress] says otherwise.
@@ -294,7 +336,7 @@ class _AlbumPhotoTileState extends State<AlbumPhotoTile> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final selected = widget.selected;
-    final showBadge = widget.selecting || _hovered;
+    final showBadge = widget.selectable && (widget.selecting || _hovered);
 
     return Semantics(
       label: widget.photo.fileName,
@@ -310,7 +352,13 @@ class _AlbumPhotoTileState extends State<AlbumPhotoTile> {
           onEnter: (_) => setState(() => _hovered = true),
           onExit: (_) => setState(() => _hovered = false),
           child: GestureDetector(
-            onTap: widget.onTap,
+            onTap: () {
+              final box = context.findRenderObject() as RenderBox?;
+              final origin = box != null && box.hasSize && box.attached
+                  ? box.localToGlobal(Offset.zero) & box.size
+                  : null;
+              widget.onTap(origin);
+            },
             onLongPress: widget.onLongPress ?? widget.onToggle,
             child: AnimatedScale(
               scale: selected ? 0.86 : 1,
@@ -323,29 +371,32 @@ class _AlbumPhotoTileState extends State<AlbumPhotoTile> {
                   children: [
                     ColoredBox(
                       color: scheme.surfaceContainerHighest,
-                      child: Image(
-                        // Decoded at roughly tile resolution rather than full
-                        // size. The preview reuses this decode as its
-                        // placeholder.
-                        image: albumThumbnailProvider(
-                          widget.photo.file,
-                          library: widget.library,
-                        ),
-                        fit: BoxFit.cover,
-                        gaplessPlayback: true,
-                        frameBuilder: (context, child, frame, sync) {
-                          if (sync) return child;
-                          return AnimatedOpacity(
-                            opacity: frame == null ? 0 : 1,
-                            duration: const Duration(milliseconds: 240),
-                            curve: Curves.easeOut,
-                            child: child,
-                          );
-                        },
-                        errorBuilder: (_, _, _) => Center(
-                          child: Icon(
-                            Icons.broken_image_outlined,
-                            color: scheme.onSurfaceVariant,
+                      child: AlbumAdjustedView(
+                        adjustment: widget.adjustment,
+                        child: Image(
+                          // Decoded at roughly tile resolution rather than
+                          // full size. The preview reuses this decode as its
+                          // placeholder.
+                          image: albumThumbnailProvider(
+                            widget.photo.file,
+                            library: widget.library,
+                          ),
+                          fit: BoxFit.cover,
+                          gaplessPlayback: true,
+                          frameBuilder: (context, child, frame, sync) {
+                            if (sync) return child;
+                            return AnimatedOpacity(
+                              opacity: frame == null ? 0 : 1,
+                              duration: const Duration(milliseconds: 240),
+                              curve: Curves.easeOut,
+                              child: child,
+                            );
+                          },
+                          errorBuilder: (_, _, _) => Center(
+                            child: Icon(
+                              Icons.broken_image_outlined,
+                              color: scheme.onSurfaceVariant,
+                            ),
                           ),
                         ),
                       ),
@@ -495,6 +546,43 @@ class AlbumStateView extends StatelessWidget {
             ),
             if (action != null) ...[const SizedBox(height: 24), action!],
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Turns and crops [child] the way [adjustment] says, without touching the file.
+///
+/// [aspect] is the child's width divided by its height. A square thumbnail is 1.
+class AlbumAdjustedView extends StatelessWidget {
+  const AlbumAdjustedView({
+    super.key,
+    required this.adjustment,
+    required this.child,
+    this.aspect = 1,
+  });
+
+  final AlbumViewAdjustment adjustment;
+  final Widget child;
+  final double aspect;
+
+  @override
+  Widget build(BuildContext context) {
+    if (adjustment.isOriginal) return child;
+    final scale = albumCoverScale(
+      degrees: adjustment.degrees,
+      imageAspect: aspect > 0 ? aspect : 1,
+    );
+    return ClipRect(
+      child: FractionalTranslation(
+        translation: Offset(adjustment.panX, adjustment.panY),
+        child: Transform.scale(
+          scale: scale,
+          child: Transform.rotate(
+            angle: adjustment.degrees * math.pi / 180,
+            child: child,
+          ),
         ),
       ),
     );

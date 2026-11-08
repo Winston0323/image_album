@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -172,8 +173,12 @@ Future<void> deleteAlbumCatalog(String source) async {
   try {
     final file = albumCatalogFile(source);
     if (!await file.exists()) return;
-    await _setHidden(file, false);
-    await file.delete();
+    try {
+      await file.delete();
+    } catch (_) {
+      await _setHidden(file, false);
+      await file.delete();
+    }
   } catch (_) {}
 }
 
@@ -182,7 +187,10 @@ Future<void> deleteAlbumCatalog(String source) async {
 Future<void> _setHidden(File file, bool hidden) async {
   if (!Platform.isWindows || !await file.exists()) return;
   try {
-    await Process.run('attrib', [hidden ? '+h' : '-h', file.path]);
+    // Fire-and-forget: awaiting `attrib` stalls under widget-test FakeAsync,
+    // where a real process never completes. A missed attribute only affects
+    // Explorer; the leading dot still hides the file everywhere else.
+    unawaited(Process.run('attrib', [hidden ? '+h' : '-h', file.path]));
   } catch (_) {
     // Still a dot file; only Explorer shows it.
   }

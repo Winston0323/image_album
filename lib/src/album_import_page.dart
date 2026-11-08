@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
 import 'album_camera.dart';
+import 'album_drag_select.dart';
 import 'album_photo.dart';
+import 'album_images.dart';
 import 'album_preview_page.dart';
+import 'album_preview_zoom.dart';
 import 'album_widgets.dart';
 
 /// The camera's shots, one tile per shutter press, to pick from and copy into
@@ -36,7 +40,7 @@ class AlbumImportPage extends StatefulWidget {
 
   /// Asks the user for a folder of photos. When null, the system folder
   /// dialog is used where there is one.
-  final Future<String?> Function()? pickFolder;
+  final Future<String?> Function([String? initialDirectory])? pickFolder;
 
   @override
   State<AlbumImportPage> createState() => _AlbumImportPageState();
@@ -66,7 +70,12 @@ class _AlbumImportPageState extends State<AlbumImportPage> {
 
   /// Paths of the file each picked shot is shown as.
   final Set<String> _picked = {};
-  final Set<String> _seen = {};
+
+  /// The shot a shift-click selects a range from: the last one picked.
+  String? _anchor;
+
+  final GlobalKey<AlbumDragSelectState> _dragKey = GlobalKey();
+  final ScrollController _gridController = ScrollController();
 
   late final TextEditingController _name = TextEditingController(
     text: _today(),
@@ -100,6 +109,7 @@ class _AlbumImportPageState extends State<AlbumImportPage> {
 
   @override
   void dispose() {
+    _gridController.dispose();
     _name.dispose();
     super.dispose();
   }
@@ -132,12 +142,11 @@ class _AlbumImportPageState extends State<AlbumImportPage> {
     setState(() {
       _volumes = volumes;
       _shots = albumGroupCameraShots(photos);
-      for (final shot in _shots!) {
-        final id = shot.display.file.path;
-        // A shot found while the cards are still being listed starts
-        // picked. One the user has since unticked is left unticked.
-        if (_seen.add(id)) _picked.add(id);
-      }
+      // Shots start unpicked. Keep any the user already chose that are
+      // still among the ones on screen.
+      final ids = {for (final shot in _shots!) shot.display.file.path};
+      _picked.removeWhere((id) => !ids.contains(id));
+      if (_anchor != null && !_picked.contains(_anchor)) _anchor = null;
     });
   }
 
@@ -312,6 +321,105 @@ class _AlbumImportPageState extends State<AlbumImportPage> {
     final id = shot.display.file.path;
     setState(() {
       if (!_picked.remove(id)) _picked.add(id);
+      _anchor = id;
+    });
+  }
+
+  /// Shift-click: adds every shot from the one picked last to [shot], leaving
+  /// what is already picked alone. With nothing picked, [shot] is the start.
+  void _selectRange(List<AlbumCameraShot> shots, AlbumCameraShot shot) {
+    final ids = [for (final s in shots) s.display.file.path];
+    final to = ids.indexOf(shot.display.file.path);
+    if (to < 0) return;
+
+    final start = _anchor;
+    final from = start != null && _picked.contains(start)
+        ? ids.indexOf(start)
+        : -1;
+
+    setState(() {
+      if (from < 0) {
+        _picked.add(shot.display.file.path);
+      } else {
+        final lo = from < to ? from : to;
+        final hi = from < to ? to : from;
+        for (var i = lo; i <= hi; i++) {
+          _picked.add(ids[i]);
+        }
+      }
+      _anchor = shot.display.file.path;
+    });
+  }
+
+  /// A click on a tile, or on its check badge when [openIfIdle] is false.
+  void _click(
+    List<AlbumCameraShot> shots,
+    List<AlbumPhoto> flat,
+    AlbumCameraShot shot,
+    int index, {
+    required bool openIfIdle,
+    Rect? origin,
+  }) {
+    if (_dragKey.currentState?.justDragged ?? false) return;
+
+    final keyboard = HardwareKeyboard.instance;
+    final additive = keyboard.isControlPressed || keyboard.isMetaPressed;
+
+    if (keyboard.isShiftPressed) {
+      _selectRange(shots, shot);
+    } else if (additive || _picked.isNotEmpty || !openIfIdle) {
+      _toggle(shot);
+    } else {
+      _open(shots, flat, index, origin: origin);
+    }
+  }
+
+  void _clickBlank() {
+    if (_picked.isEmpty) return;
+    if (_dragKey.currentState?.justDragged ?? false) return;
+    setState(() {
+      _picked.clear();
+      _anchor = null;
+    });
+  }
+
+  void _longPress(AlbumCameraShot shot) {
+    final photo = shot.display;
+    if (_dragKey.currentState?.beginHold(photo) ?? false) return;
+    _toggle(shot);
+  }
+
+  bool _dragStart(AlbumPhoto photo) {
+    final shots = _shots;
+    if (shots == null) return true;
+    final shot = _shotOf(shots, photo);
+    if (shot == null) return true;
+    final id = shot.display.file.path;
+    final select = !_picked.contains(id);
+    _dragPaint([photo], select);
+    _anchor = id;
+    return select;
+  }
+
+  void _dragPaint(Iterable<AlbumPhoto> photos, bool select) {
+    final shots = _shots;
+    if (shots == null) return;
+    final ids = <String>[
+      for (final photo in photos)
+        if (_shotOf(shots, photo) case final shot?) shot.display.file.path,
+    ];
+    if (ids.isEmpty) return;
+    final changes = select
+        ? ids.any((id) => !_picked.contains(id))
+        : ids.any(_picked.contains);
+    if (!changes) return;
+    setState(() {
+      if (select) {
+        _picked.addAll(ids);
+        _anchor = ids.last;
+      } else {
+        _picked.removeAll(ids);
+      }
     });
   }
 
@@ -327,9 +435,30 @@ class _AlbumImportPageState extends State<AlbumImportPage> {
         _picked.removeAll(ids);
       } else {
         _picked.addAll(ids);
+        if (ids.isNotEmpty) _anchor = ids.first;
       }
     });
   }
+
+  void _selectAll(List<AlbumCameraShot> shots) {
+    setState(() {
+      _picked
+        ..clear()
+        ..addAll(shots.map((shot) => shot.display.file.path));
+      if (shots.isNotEmpty) _anchor = shots.first.display.file.path;
+    });
+  }
+
+  void _selectNone() {
+    setState(() {
+      _picked.clear();
+      _anchor = null;
+    });
+  }
+
+  bool _allPicked(List<AlbumCameraShot> shots) =>
+      shots.isNotEmpty &&
+      shots.every((shot) => _picked.contains(shot.display.file.path));
 
   bool? _dayChecked(AlbumDaySection section, List<AlbumCameraShot> shots) {
     var picked = 0;
@@ -354,11 +483,144 @@ class _AlbumImportPageState extends State<AlbumImportPage> {
     return count;
   }
 
+  List<AlbumCameraShot> _pickedShots(List<AlbumCameraShot> shots) => [
+    for (final shot in shots)
+      if (_picked.contains(shot.display.file.path)) shot,
+  ];
+
+  /// Drops files that are no longer on the card from the in-memory list, so
+  /// the grid matches what is left. A shot with nothing left of either kind
+  /// leaves the pick list too.
+  void _forgetMissing() {
+    for (final folders in _files.values) {
+      for (final entry in folders.entries.toList()) {
+        final kept = [
+          for (final photo in entry.value)
+            if (photo.file.existsSync()) photo,
+        ];
+        if (kept.isEmpty) {
+          folders.remove(entry.key);
+        } else {
+          folders[entry.key] = kept;
+        }
+      }
+    }
+    _publish();
+  }
+
+  /// Deletes the picked shots from the cards, without copying them.
+  Future<void> _delete(List<AlbumCameraShot> shots) async {
+    final chosen = _pickedShots(shots);
+    if (chosen.isEmpty || _busy) return;
+
+    final files = _fileCount(shots);
+    final agreed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        icon: Icon(
+          Icons.delete_outline_rounded,
+          color: Theme.of(context).colorScheme.error,
+        ),
+        title: Text(
+          files == 1
+              ? 'Delete 1 file from the camera?'
+              : 'Delete $files files from the camera?',
+        ),
+        content: const Text(
+          'The selected photos are removed from their cards. '
+          'Nothing is copied into the album. This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+              foregroundColor: Theme.of(context).colorScheme.onError,
+            ),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (agreed != true || !mounted) return;
+
+    final cancelled = _Cancel();
+    final progress = ValueNotifier<(int, int)>((0, 0));
+    setState(() => _busy = true);
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          title: const Text('Deleting'),
+          content: ValueListenableBuilder<(int, int)>(
+            valueListenable: progress,
+            builder: (context, value, _) => Text(
+              value.$2 == 0 ? 'Starting…' : '${value.$1} of ${value.$2} files',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => cancelled.value = true,
+              child: const Text('Stop'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    AlbumImportResult? result;
+    Object? failure;
+    try {
+      result = await albumDeleteShots(
+        shots: chosen,
+        kind: _kind,
+        cancelled: () => cancelled.value,
+        onProgress: (done, total) => progress.value = (done, total),
+      );
+    } on Object catch (error) {
+      failure = error;
+    } finally {
+      if (mounted) Navigator.of(context).pop();
+      progress.dispose();
+    }
+    if (!mounted) return;
+    setState(() => _busy = false);
+
+    if (failure != null || result == null) {
+      ScaffoldMessenger.maybeOf(
+        context,
+      )?.showSnackBar(SnackBar(content: Text('Could not delete: $failure')));
+      return;
+    }
+
+    // Drop what was removed so the grid matches the cards.
+    if (result.deleted > 0) _forgetMissing();
+
+    final failed = result.errors.length;
+    final summary = StringBuffer(
+      'Removed ${albumFormatCount(result.deleted)} '
+      '${result.deleted == 1 ? 'file' : 'files'} from the camera',
+    );
+    if (result.skipped > 0) {
+      summary.write(
+        ', ${albumFormatCount(result.skipped)} had nothing of that kind',
+      );
+    }
+    if (result.stopped) summary.write(', and stopped early');
+    if (failed > 0) summary.write('. ${result.errors.first}');
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(SnackBar(content: Text(summary.toString())));
+  }
+
   Future<void> _import(List<AlbumCameraShot> shots) async {
-    final chosen = [
-      for (final shot in shots)
-        if (_picked.contains(shot.display.file.path)) shot,
-    ];
+    final chosen = _pickedShots(shots);
     final name = _clean;
     if (chosen.isEmpty || name.isEmpty || _busy) return;
 
@@ -392,7 +654,7 @@ class _AlbumImportPageState extends State<AlbumImportPage> {
     }
 
     final cancelled = _Cancel();
-    final progress = ValueNotifier<(int, int)>((0, 0));
+    final progress = ValueNotifier<AlbumCopyProgress?>(null);
     setState(() => _busy = true);
     showDialog<void>(
       context: context,
@@ -401,11 +663,9 @@ class _AlbumImportPageState extends State<AlbumImportPage> {
         canPop: false,
         child: AlertDialog(
           title: const Text('Copying'),
-          content: ValueListenableBuilder<(int, int)>(
+          content: ValueListenableBuilder<AlbumCopyProgress?>(
             valueListenable: progress,
-            builder: (context, value, _) => Text(
-              value.$2 == 0 ? 'Starting…' : '${value.$1} of ${value.$2} files',
-            ),
+            builder: (context, value, _) => _CopyProgressView(progress: value),
           ),
           actions: [
             TextButton(
@@ -426,7 +686,7 @@ class _AlbumImportPageState extends State<AlbumImportPage> {
         destination: p.join(widget.parentPath, name),
         deleteAfter: _deleteAfter,
         cancelled: () => cancelled.value,
-        onProgress: (done, total) => progress.value = (done, total),
+        onProgress: (value) => progress.value = value,
       );
     } on Object catch (error) {
       failure = error;
@@ -445,18 +705,35 @@ class _AlbumImportPageState extends State<AlbumImportPage> {
     Navigator.of(context).pop((name, result));
   }
 
-  void _open(List<AlbumCameraShot> shots, List<AlbumPhoto> flat, int index) {
+  Future<void> _open(
+    List<AlbumCameraShot> shots,
+    List<AlbumPhoto> flat,
+    int index, {
+    Rect? origin,
+  }) async {
     final ordered = [for (final photo in flat) _shotOf(shots, photo)!];
+    final screen = MediaQuery.sizeOf(context);
+    final flight = albumFittedProvider(ordered[index].display.file, screen);
+    try {
+      await precacheImage(flight, context);
+    } on Object {
+      // Still open; the Image will decode during the flight if needed.
+    }
+    if (!mounted) return;
     Navigator.of(context).push(
       PageRouteBuilder<void>(
-        transitionDuration: const Duration(milliseconds: 220),
-        reverseTransitionDuration: const Duration(milliseconds: 180),
+        opaque: false,
+        transitionDuration: const Duration(milliseconds: 360),
+        reverseTransitionDuration: const Duration(milliseconds: 280),
         pageBuilder: (_, _, _) =>
             _ShotPreview(shots: ordered, initialIndex: index),
-        transitionsBuilder: (_, animation, _, child) => FadeTransition(
-          opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
-          child: child,
-        ),
+        transitionsBuilder: (_, animation, _, child) =>
+            AlbumPreviewZoomTransition(
+              animation: animation,
+              fromGlobal: origin,
+              flight: flight,
+              child: child,
+            ),
       ),
     );
   }
@@ -470,7 +747,16 @@ class _AlbumImportPageState extends State<AlbumImportPage> {
       appBar: AppBar(
         title: Text(clean.isEmpty ? 'Import' : 'Import into "$clean"'),
         actions: [
-          if (shots != null)
+          if (shots != null) ...[
+            IconButton(
+              tooltip: _fileCount(shots) == 0
+                  ? 'Delete from the camera'
+                  : 'Delete ${_fileCount(shots)} from the camera',
+              onPressed: _busy || _fileCount(shots) == 0
+                  ? null
+                  : () => _delete(shots),
+              icon: const Icon(Icons.delete_outline_rounded),
+            ),
             Padding(
               padding: const EdgeInsets.only(right: 8),
               child: FilledButton(
@@ -480,6 +766,7 @@ class _AlbumImportPageState extends State<AlbumImportPage> {
                 child: Text('Import ${_fileCount(shots)}'),
               ),
             ),
+          ],
         ],
       ),
       body: Row(
@@ -711,26 +998,33 @@ class _AlbumImportPageState extends State<AlbumImportPage> {
                     ? null
                     : (value) => setState(() => _kind = value.first),
               ),
-              FilterChip(
-                label: const Text('Delete from the camera after copying'),
-                selected: _deleteAfter,
-                onSelected: _busy
+              InkWell(
+                onTap: _busy
                     ? null
-                    : (value) => setState(() => _deleteAfter = value),
+                    : () => setState(() => _deleteAfter = !_deleteAfter),
+                borderRadius: BorderRadius.circular(8),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Checkbox(
+                      value: _deleteAfter,
+                      visualDensity: VisualDensity.compact,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      onChanged: _busy
+                          ? null
+                          : (value) =>
+                                setState(() => _deleteAfter = value ?? false),
+                    ),
+                    const Text('Delete from the camera after copying'),
+                    const SizedBox(width: 4),
+                  ],
+                ),
               ),
               TextButton(
-                onPressed: () => setState(() {
-                  if (_picked.length == shots.length) {
-                    _picked.clear();
-                  } else {
-                    _picked
-                      ..clear()
-                      ..addAll(shots.map((shot) => shot.display.file.path));
-                  }
-                }),
-                child: Text(
-                  _picked.length == shots.length ? 'Select none' : 'Select all',
-                ),
+                onPressed: _allPicked(shots)
+                    ? _selectNone
+                    : () => _selectAll(shots),
+                child: Text(_allPicked(shots) ? 'Select none' : 'Select all'),
               ),
             ],
           ),
@@ -753,50 +1047,145 @@ class _AlbumImportPageState extends State<AlbumImportPage> {
     final flat = [for (final section in sections) ...section.photos];
     final headerHeight = AlbumDayHeaderDelegate.heightFor(context);
 
-    return CustomScrollView(
-      slivers: [
-        for (final section in sections)
-          SliverMainAxisGroup(
-            slivers: [
-              SliverPersistentHeader(
-                pinned: true,
-                delegate: AlbumDayHeaderDelegate(
-                  section,
-                  height: headerHeight,
-                  selected: _dayChecked(section, shots),
-                  onSelect: () => _selectDay(section, shots),
-                ),
-              ),
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(10, 2, 10, 8),
-                sliver: SliverGrid.builder(
-                  gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                    // The same size the album's own grid uses.
-                    maxCrossAxisExtent: 140,
-                    mainAxisSpacing: 4,
-                    crossAxisSpacing: 4,
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.keyA, control: true): () =>
+            _selectAll(shots),
+        const SingleActivator(LogicalKeyboardKey.keyA, meta: true): () =>
+            _selectAll(shots),
+        if (_picked.isNotEmpty)
+          const SingleActivator(LogicalKeyboardKey.escape): _selectNone,
+      },
+      child: Focus(
+        autofocus: true,
+        child: AlbumDragSelect(
+          key: _dragKey,
+          controller: _gridController,
+          onStart: _dragStart,
+          onPaint: _dragPaint,
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTap: _clickBlank,
+            child: CustomScrollView(
+              controller: _gridController,
+              slivers: [
+                for (final section in sections)
+                  SliverMainAxisGroup(
+                    slivers: [
+                      SliverPersistentHeader(
+                        pinned: true,
+                        delegate: AlbumDayHeaderDelegate(
+                          section,
+                          height: headerHeight,
+                          selected: _dayChecked(section, shots),
+                          onSelect: () => _selectDay(section, shots),
+                        ),
+                      ),
+                      SliverPadding(
+                        padding: const EdgeInsets.fromLTRB(10, 2, 10, 8),
+                        sliver: SliverGrid.builder(
+                          gridDelegate:
+                              const SliverGridDelegateWithMaxCrossAxisExtent(
+                                // The same size the album's own grid uses.
+                                maxCrossAxisExtent: 140,
+                                mainAxisSpacing: 4,
+                                crossAxisSpacing: 4,
+                              ),
+                          itemCount: section.photos.length,
+                          itemBuilder: (context, index) {
+                            final photo = section.photos[index];
+                            final shot = _shotOf(shots, photo)!;
+                            final at = flat.indexOf(photo);
+                            return AlbumPhotoTile(
+                              key: ValueKey(shot.display.file.path),
+                              photo: photo,
+                              selecting: true,
+                              selected: _picked.contains(
+                                shot.display.file.path,
+                              ),
+                              onTap: (origin) => _click(
+                                shots,
+                                flat,
+                                shot,
+                                at,
+                                openIfIdle: true,
+                                origin: origin,
+                              ),
+                              onToggle: () => _click(
+                                shots,
+                                flat,
+                                shot,
+                                at,
+                                openIfIdle: false,
+                              ),
+                              onLongPress: () => _longPress(shot),
+                            );
+                          },
+                        ),
+                      ),
+                    ],
                   ),
-                  itemCount: section.photos.length,
-                  itemBuilder: (context, index) {
-                    final photo = section.photos[index];
-                    final shot = _shotOf(shots, photo)!;
-                    final at = flat.indexOf(photo);
-                    return AlbumPhotoTile(
-                      key: ValueKey(shot.display.file.path),
-                      photo: photo,
-                      selecting: true,
-                      selected: _picked.contains(shot.display.file.path),
-                      onTap: () => _open(shots, flat, at),
-                      onToggle: () => _toggle(shot),
-                    );
-                  },
-                ),
-              ),
-            ],
+                const SliverToBoxAdapter(child: SizedBox(height: 24)),
+              ],
+            ),
           ),
-        const SliverToBoxAdapter(child: SizedBox(height: 24)),
+        ),
+      ),
+    );
+  }
+}
+
+/// File count, bytes and transfer speed in the copy dialog.
+class _CopyProgressView extends StatelessWidget {
+  const _CopyProgressView({required this.progress});
+
+  final AlbumCopyProgress? progress;
+
+  @override
+  Widget build(BuildContext context) {
+    final value = progress;
+    if (value == null || value.total == 0) {
+      return const Text('Starting…');
+    }
+    final theme = Theme.of(context);
+    final fraction = value.bytesTotal == 0
+        ? value.done / value.total
+        : (value.bytesDone / value.bytesTotal).clamp(0.0, 1.0);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        LinearProgressIndicator(value: fraction),
+        const SizedBox(height: 14),
+        Text('${value.done} of ${value.total} files'),
+        if ([
+              if (value.bytesTotal > 0)
+                '${_formatBytes(value.bytesDone)} of ${_formatBytes(value.bytesTotal)}',
+              if (value.bytesPerSecond case final speed?)
+                '${_formatBytes(speed.round())}/s',
+            ]
+            case final parts when parts.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Text(
+            parts.join(' · '),
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
       ],
     );
+  }
+
+  static String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(bytes < 10 * 1024 ? 1 : 0)} KB';
+    }
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
   }
 }
 
@@ -826,6 +1215,7 @@ class _ShotPreviewState extends State<_ShotPreview> {
     return AlbumPreviewPage(
       photos: _shown,
       initialIndex: widget.initialIndex,
+      veil: false,
       corner: (photo) {
         final index = _shown.indexOf(photo);
         if (index < 0) return const SizedBox.shrink();

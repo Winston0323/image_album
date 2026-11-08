@@ -69,6 +69,11 @@ class _AlbumHome extends StatefulWidget {
 
 class _AlbumHomeState extends State<_AlbumHome> {
   AlbumLibrary? _library;
+  final GlobalKey<ImageAlbumState> _albumKey = GlobalKey();
+
+  /// Thumbnails done and total while a background regenerate is running, or
+  /// null when idle.
+  (int, int)? _regenProgress;
 
   /// Whether the album has had a folder this session. Until it has, no folders
   /// means the welcome screen. After, it means the album's own invitation to
@@ -112,10 +117,22 @@ class _AlbumHomeState extends State<_AlbumHome> {
       ..showSnackBar(bar);
   }
 
-  Future<void> _addSource() async {
-    final library = _library;
+  Future<void> _importFromWelcome() async {
     final path = await pickAlbumFolder(context);
-    if (library == null || !mounted || path == null) return;
+    if (!mounted || path == null) return;
+    final kind = await askAlbumFolderKind(context, path);
+    if (!mounted || kind == null) return;
+    if (kind == AlbumFolderKind.film) {
+      await _library?.setFilmLibrary(path);
+      if (mounted) setState(() => _started = true);
+      return;
+    }
+    await _addDigital(path);
+  }
+
+  Future<void> _addDigital(String path) async {
+    final library = _library;
+    if (library == null || !mounted) return;
     try {
       if (await library.addSource(path)) {
         setState(() => _started = true);
@@ -158,34 +175,76 @@ class _AlbumHomeState extends State<_AlbumHome> {
     if (library == null) return;
     final usage = await library.cacheUsage();
     if (!mounted) return;
-    final clear = await showDialog<bool>(
+    final choice = await showDialog<_CacheAction>(
       context: context,
+      barrierDismissible: false,
       builder: (context) => AlertDialog(
         title: const Text('Cache'),
         content: Text(
           '${usage.thumbnailCount} thumbnails, ${_size(usage.thumbnailBytes)}\n'
           '${usage.indexCount} folder indexes, ${_size(usage.indexBytes)}\n\n'
           'Thumbnails keep the grid quick and the indexes show a folder at '
-          'once when it is opened again. Both are rebuilt as needed.',
+          'once when it is opened again. Both are rebuilt as needed.\n\n'
+          'Regenerate makes every thumbnail again, for when they look wrong.',
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context, false),
+            onPressed: () => Navigator.pop(context),
             child: const Text('Close'),
           ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
+          TextButton(
+            onPressed: () => Navigator.pop(context, _CacheAction.clear),
             child: const Text('Clear cache'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, _CacheAction.regenerate),
+            child: const Text('Regenerate'),
           ),
         ],
       ),
     );
-    if (clear == true) {
-      await library.clearCaches();
+    if (choice == _CacheAction.clear) {
+      try {
+        await library.clearCaches();
+      } catch (_) {}
       if (mounted) {
         _tell(const SnackBar(content: Text('Cache cleared.')));
       }
+    } else if (choice == _CacheAction.regenerate) {
+      _regenerateInBackground();
     }
+  }
+
+  void _regenerateInBackground() {
+    final album = _albumKey.currentState;
+    if (album == null || _regenProgress != null) return;
+    setState(() => _regenProgress = (0, 0));
+    album
+        .regenerateCache(
+          onProgress: (done, total) {
+            if (!mounted) return;
+            final current = _regenProgress;
+            // Skip rebuilds that do not move the bar by a visible amount.
+            if (current != null &&
+                total == current.$2 &&
+                total > 0 &&
+                (done - current.$1) * 40 < total &&
+                done < total) {
+              return;
+            }
+            setState(() => _regenProgress = (done, total));
+          },
+          cancelled: () => !mounted,
+        )
+        .then((made) {
+          if (!mounted) return;
+          _tell(
+            SnackBar(content: Text('Cache regenerated: $made thumbnails.')),
+          );
+        })
+        .whenComplete(() {
+          if (mounted) setState(() => _regenProgress = null);
+        });
   }
 
   static String _size(int bytes) {
@@ -215,10 +274,11 @@ class _AlbumHomeState extends State<_AlbumHome> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
     if (library.sources.isEmpty && !_started) {
-      return _Welcome(onChoose: _addSource);
+      return _Welcome(onChoose: _importFromWelcome);
     }
 
     return ImageAlbum(
+      key: _albumKey,
       paths: library.sources,
       recursive: true,
       library: library,
@@ -226,10 +286,46 @@ class _AlbumHomeState extends State<_AlbumHome> {
       onExcludedFoldersChanged: (excluded) => library.setExcluded(excluded),
       initialFileTypes: library.fileTypes,
       onFileTypesChanged: (types) => library.setFileTypes(types),
-      onAddSource: _addSource,
+      onImportDigital: _addDigital,
       onRemoveSource: _removeSource,
-      pickFolder: () => pickAlbumFolder(context),
+      pickFolder: ([initial]) => pickAlbumFolder(
+        context,
+        initialDirectory: initial ?? _library?.filmLibrary,
+      ),
+      filmLibraryPath: library.filmLibrary,
+      onFilmLibraryChanged: (path) {
+        library.setFilmLibrary(path);
+        setState(() => _started = true);
+      },
       actions: [
+        if (_regenProgress case final progress?)
+          Tooltip(
+            message: progress.$2 == 0
+                ? 'Regenerating cache…'
+                : 'Regenerating ${progress.$1} of ${progress.$2}',
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: SizedBox(
+                width: 96,
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    LinearProgressIndicator(
+                      value: progress.$2 == 0
+                          ? null
+                          : progress.$1 / progress.$2,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      progress.$2 == 0 ? '…' : '${progress.$1}/${progress.$2}',
+                      style: Theme.of(context).textTheme.labelSmall,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
         IconButton(
           tooltip: 'Cache',
           onPressed: _showCache,
@@ -252,6 +348,8 @@ class _AlbumHomeState extends State<_AlbumHome> {
     );
   }
 }
+
+enum _CacheAction { clear, regenerate }
 
 /// How much larger than Material's default type scale the demo sets its text.
 /// The default is tuned for phones held close; on a desktop monitor it reads

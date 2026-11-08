@@ -14,7 +14,7 @@ import 'package:path/path.dart' as p;
 
 /// A [width]x[height] JPEG of random noise, so it does not compress away: a
 /// 600x400 one is far over the size the album takes as a real preview.
-Uint8List _noisyJpeg(int width, int height, {int seed = 1}) {
+Uint8List _noisyJpeg(int width, int height, {int seed = 1, int? orientation}) {
   final random = Random(seed);
   final image = img.Image(width: width, height: height);
   for (final pixel in image) {
@@ -23,7 +23,43 @@ Uint8List _noisyJpeg(int width, int height, {int seed = 1}) {
       ..g = random.nextInt(256)
       ..b = random.nextInt(256);
   }
-  return img.encodeJpg(image, quality: 90);
+  final jpeg = Uint8List.fromList(img.encodeJpg(image, quality: 90));
+  if (orientation == null) return jpeg;
+  return _jpegWithOrientation(jpeg, orientation);
+}
+
+/// [jpeg] with an EXIF Orientation APP1 after SOI. The `image` package drops
+/// EXIF when encoding, so tagged previews are built this way.
+Uint8List _jpegWithOrientation(Uint8List jpeg, int orientation) {
+  final tiff = BytesBuilder()
+    ..add([0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00])
+    ..add([0x01, 0x00])
+    ..add([
+      0x12,
+      0x01,
+      0x03,
+      0x00,
+      0x01,
+      0x00,
+      0x00,
+      0x00,
+      orientation,
+      0x00,
+      0x00,
+      0x00,
+    ])
+    ..add([0x00, 0x00, 0x00, 0x00]);
+  final payload = BytesBuilder()
+    ..add([0x45, 0x78, 0x69, 0x66, 0x00, 0x00])
+    ..add(tiff.toBytes());
+  final body = payload.toBytes();
+  final app1Len = body.length + 2;
+  return (BytesBuilder()
+        ..add([0xFF, 0xD8])
+        ..add([0xFF, 0xE1, (app1Len >> 8) & 0xFF, app1Len & 0xFF])
+        ..add(body)
+        ..add(jpeg.sublist(2)))
+      .toBytes();
 }
 
 /// A smooth [width]x[height] JPEG, tiny, like a camera's thumbnail.
@@ -508,6 +544,38 @@ void main() {
       expect(await albumDecodableBytes(file.path), preview);
     });
 
+    test('a jpeg saved beside the raw is its full picture', () async {
+      final raw = await write('shot.arw', _tiffFile());
+      final jpeg = File('${p.dirname(raw.path)}/shot.JPG');
+      await jpeg.writeAsBytes(_smallJpeg(32, 24));
+
+      expect(
+        p.basename(albumSiblingJpeg(raw)!.path).toLowerCase(),
+        'shot.jpg',
+      );
+    });
+
+    test('a full jpeg past a large named preview is the one shown', () async {
+      // Big enough that the old search treated the named preview as final
+      // and never read the full picture stored further on.
+      final preview = _noisyJpeg(800, 700, seed: 2);
+      expect(preview.length, greaterThan(120 * 1024));
+      final full = _noisyJpeg(1200, 800, seed: 4);
+      final file = await write(
+        'a.arw',
+        (BytesBuilder()
+              ..add(_tiffFile(named: preview))
+              ..add(Uint8List(5 << 20))
+              ..add(full))
+            .toBytes(),
+      );
+
+      expect(
+        _sizeOf((await albumDecodableBytes(file.path))!),
+        const Size(1200, 800),
+      );
+    });
+
     test('the biggest of several is the one', () async {
       final big = _noisyJpeg(900, 600, seed: 8);
       final middling = _noisyJpeg(240, 160, seed: 9);
@@ -561,6 +629,47 @@ void main() {
         const Size(600, 400),
       );
     });
+
+    test(
+      'a preview that claims to be upright is still turned from the raw',
+      () async {
+        // Sony often stamps Orientation=1 on landscape preview pixels while
+        // the ARW's own IFD0 says the camera was on its side.
+        final preview = _noisyJpeg(600, 400, seed: 2, orientation: 1);
+        final file = await write(
+          'a.arw',
+          _tiffFile(named: preview, orientation: 6),
+        );
+
+        expect(
+          _sizeOf((await albumDecodableBytes(file.path))!),
+          const Size(400, 600),
+        );
+      },
+    );
+
+    test(
+      'a preview that already carries the raw\'s orientation is not turned twice',
+      () async {
+        // decodeJpg applies the JPEG tag; handing the tagged bytes to Flutter
+        // would turn them again (or leave them sideways). The result must be
+        // upright pixels with no Orientation tag.
+        final preview = _noisyJpeg(600, 400, seed: 2, orientation: 6);
+        final file = await write(
+          'a.arw',
+          _tiffFile(named: preview, orientation: 6),
+        );
+
+        final bytes = await albumDecodableBytes(file.path);
+        expect(_sizeOf(bytes!), const Size(400, 600));
+        // A second decode must not swap the sides again.
+        expect(_sizeOf(bytes), const Size(400, 600));
+        final decoded = img.decodeJpg(bytes)!;
+        expect(decoded.exif.imageIfd.hasOrientation, isFalse);
+        expect(decoded.width, 400);
+        expect(decoded.height, 600);
+      },
+    );
 
     test('a raw with no preview and no picture gives nothing', () async {
       final file = await write('a.arw', _tiffFile());
@@ -828,6 +937,53 @@ void main() {
 
       expect(image.width, albumThumbnailWidth);
       expect(image.height, 160);
+    });
+
+    testWidgets('a sideways raw gets an upright grid thumbnail', (
+      tester,
+    ) async {
+      final file = (await tester.runAsync(
+        () => write(
+          'a.arw',
+          _tiffFile(
+            named: _noisyJpeg(600, 400, orientation: 1),
+            orientation: 6,
+          ),
+        ),
+      ))!;
+
+      final image = await resolve(
+        tester,
+        AlbumThumbnailProvider(
+          file,
+          cacheDirectory: Directory(p.join(temp.path, 'cache')),
+        ),
+      );
+
+      // 400×600 after the turn, then fitted to thumbnail width.
+      expect(image.width, albumThumbnailWidth);
+      expect(image.height, 360);
+    });
+
+    testWidgets('a sideways raw fits upright in the preview', (tester) async {
+      final file = (await tester.runAsync(
+        () => write(
+          'a.arw',
+          _tiffFile(
+            named: _noisyJpeg(600, 400, seed: 7, orientation: 1),
+            orientation: 6,
+          ),
+        ),
+      ))!;
+
+      final image = await resolve(
+        tester,
+        albumFittedProvider(file, const Size(400, 400)),
+      );
+
+      // 400×600 into a 400×400 box: height fills, width shrinks.
+      expect(image.width, lessThan(image.height));
+      expect(image.height, 400);
     });
 
     testWidgets('a TIFF gets one too', (tester) async {

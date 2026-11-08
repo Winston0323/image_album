@@ -1,11 +1,115 @@
 #include "utils.h"
 
+#include <fcntl.h>
 #include <flutter_windows.h>
 #include <io.h>
 #include <stdio.h>
 #include <windows.h>
 
 #include <iostream>
+#include <string>
+#include <thread>
+
+namespace {
+
+bool IsAccessibilityTreeNoise(const std::string& line) {
+  return line.find("Failed to update ui::AXTree") != std::string::npos;
+}
+
+void ForwardStderr(HANDLE source, HANDLE destination) {
+  std::string pending;
+  char buffer[1024];
+  DWORD read = 0;
+  while (::ReadFile(source, buffer, sizeof(buffer), &read, nullptr) &&
+         read > 0) {
+    pending.append(buffer, buffer + read);
+    size_t start = 0;
+    while (true) {
+      const size_t end = pending.find('\n', start);
+      if (end == std::string::npos) {
+        pending.erase(0, start);
+        break;
+      }
+      const std::string line = pending.substr(start, end - start + 1);
+      start = end + 1;
+      if (IsAccessibilityTreeNoise(line)) {
+        continue;
+      }
+      DWORD written = 0;
+      ::WriteFile(destination, line.data(), static_cast<DWORD>(line.size()),
+                  &written, nullptr);
+    }
+    if (pending.size() > 65536) {
+      DWORD written = 0;
+      ::WriteFile(destination, pending.data(),
+                  static_cast<DWORD>(pending.size()), &written, nullptr);
+      pending.clear();
+    }
+  }
+  if (!pending.empty() && !IsAccessibilityTreeNoise(pending)) {
+    DWORD written = 0;
+    ::WriteFile(destination, pending.data(), static_cast<DWORD>(pending.size()),
+                &written, nullptr);
+  }
+  ::CloseHandle(source);
+  ::CloseHandle(destination);
+}
+
+}  // namespace
+
+void SuppressAccessibilityTreeLog() {
+  const int fd = _fileno(stderr);
+  HANDLE current = ::GetStdHandle(STD_ERROR_HANDLE);
+  if (fd < 0 || current == nullptr || current == INVALID_HANDLE_VALUE) {
+    return;
+  }
+
+  HANDLE original = nullptr;
+  if (!::DuplicateHandle(::GetCurrentProcess(), current, ::GetCurrentProcess(),
+                         &original, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+    return;
+  }
+
+  SECURITY_ATTRIBUTES security = {};
+  security.nLength = sizeof(security);
+  security.bInheritHandle = FALSE;
+  HANDLE read_end = nullptr;
+  HANDLE write_end = nullptr;
+  if (!::CreatePipe(&read_end, &write_end, &security, 1 << 16)) {
+    ::CloseHandle(original);
+    return;
+  }
+
+  // The C runtime owns write_end after this. A second handle is published as
+  // the process stderr so both fprintf and GetStdHandle reach the filter.
+  const int pipe_fd =
+      _open_osfhandle(reinterpret_cast<intptr_t>(write_end), _O_WRONLY | _O_BINARY);
+  if (pipe_fd == -1) {
+    ::CloseHandle(read_end);
+    ::CloseHandle(write_end);
+    ::CloseHandle(original);
+    return;
+  }
+  HANDLE published = nullptr;
+  if (!::DuplicateHandle(::GetCurrentProcess(), write_end,
+                         ::GetCurrentProcess(), &published, 0, FALSE,
+                         DUPLICATE_SAME_ACCESS) ||
+      _dup2(pipe_fd, fd) != 0) {
+    _close(pipe_fd);
+    ::CloseHandle(read_end);
+    if (published != nullptr) {
+      ::CloseHandle(published);
+    }
+    ::CloseHandle(original);
+    return;
+  }
+  _close(pipe_fd);
+  ::SetStdHandle(STD_ERROR_HANDLE, published);
+  std::fflush(stderr);
+  setvbuf(stderr, nullptr, _IONBF, 0);
+
+  std::thread(ForwardStderr, read_end, original).detach();
+}
 
 void CreateAndAttachConsole() {
   if (::AllocConsole()) {

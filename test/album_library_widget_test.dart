@@ -169,6 +169,42 @@ void main() {
     expect(library.indexFor(photos.path)!.photoCount, 3);
   });
 
+  testWidgets('regenerating the cache replaces every thumbnail', (
+    tester,
+  ) async {
+    await writePhotos(tester, 3);
+    final library = await openLibrary(tester);
+    final key = GlobalKey<ImageAlbumState>();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ImageAlbum(key: key, path: photos.path, library: library),
+      ),
+    );
+    await settle(tester);
+
+    // A stale thumbnail that no photo will ask for again must go too.
+    final stale = File(p.join(library.thumbnailDirectory.path, 'stale.thumb'));
+    await tester.runAsync(() async {
+      await library.thumbnailDirectory.create(recursive: true);
+      await stale.writeAsBytes(_onePixelPng);
+    });
+
+    final progress = <(int, int)>[];
+    final made = await tester.runAsync(
+      () => key.currentState!.regenerateCache(
+        onProgress: (done, total) => progress.add((done, total)),
+      ),
+    );
+    await settle(tester);
+
+    expect(made, 3);
+    expect(progress.first, (0, 3));
+    expect(progress.last, (3, 3));
+    expect(await tester.runAsync(stale.exists), isFalse);
+    expect((await tester.runAsync(library.cacheUsage))!.thumbnailCount, 3);
+    expect(find.byType(Image), findsNWidgets(3));
+  });
+
   testWidgets('works without a library, as before', (tester) async {
     await writePhotos(tester, 2);
 

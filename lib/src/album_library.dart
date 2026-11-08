@@ -169,6 +169,7 @@ class AlbumLibrary extends ChangeNotifier {
   List<String> _sources = [];
   Set<String> _excluded = {};
   Set<String> _fileTypes = {};
+  String? _filmLibrary;
   AlbumCacheOptions _cache = const AlbumCacheOptions();
   final Map<String, AlbumIndexInfo> _indexes = {};
 
@@ -208,6 +209,20 @@ class AlbumLibrary extends ChangeNotifier {
   /// The file types the album is filtered to, as [albumFileType] labels such
   /// as `JPG`. Empty means every type.
   Set<String> get fileTypes => Set.unmodifiable(_fileTypes);
+
+  /// Folder of scanned film. Each child is a film, and each folder under a
+  /// film is one roll. The roll's format is kept in a hidden file inside it.
+  /// Null when none has been chosen.
+  String? get filmLibrary => _filmLibrary;
+
+  /// Remembers [path] as [filmLibrary]. Null clears it.
+  Future<void> setFilmLibrary(String? path) async {
+    final next = path == null || path.isEmpty ? null : p.normalize(path);
+    if (next == _filmLibrary) return;
+    _filmLibrary = next;
+    notifyListeners();
+    await _save();
+  }
 
   /// How thumbnails are made and how much space they may take.
   AlbumCacheOptions get cache => _cache;
@@ -388,6 +403,10 @@ class AlbumLibrary extends ChangeNotifier {
         };
       }
       _cache = AlbumCacheOptions.fromJson(json['cache']);
+      final filmLibrary = json['filmLibrary'];
+      _filmLibrary = filmLibrary is String && filmLibrary.isNotEmpty
+          ? p.normalize(filmLibrary)
+          : null;
       final indexes = json['indexes'];
       if (indexes is List) {
         for (final entry in indexes) {
@@ -402,6 +421,7 @@ class AlbumLibrary extends ChangeNotifier {
       _sources = [];
       _excluded = {};
       _fileTypes = {};
+      _filmLibrary = null;
       _cache = const AlbumCacheOptions();
       _indexes.clear();
       try {
@@ -453,6 +473,7 @@ class AlbumLibrary extends ChangeNotifier {
     'sources': _sources,
     'excluded': _excluded.toList()..sort(),
     'fileTypes': _fileTypes.toList()..sort(),
+    if (_filmLibrary != null) 'filmLibrary': _filmLibrary,
     'cache': _cache.toJson(),
     'indexes': [for (final info in _indexes.values) info._toJson()],
   };

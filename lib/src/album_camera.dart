@@ -526,19 +526,46 @@ class AlbumImportResult {
   final List<String> errors;
 }
 
+/// How far a copy has got, for the import progress dialog.
+class AlbumCopyProgress {
+  const AlbumCopyProgress({
+    required this.done,
+    required this.total,
+    required this.bytesDone,
+    required this.bytesTotal,
+    this.bytesPerSecond,
+  });
+
+  /// Files finished (copied, skipped as already there, or failed).
+  final int done;
+
+  /// Files that will be attempted.
+  final int total;
+
+  /// Bytes written so far across every file.
+  final int bytesDone;
+
+  /// Sum of the source sizes, known before any copy starts.
+  final int bytesTotal;
+
+  /// Recent throughput, or null before the first chunk lands.
+  final double? bytesPerSecond;
+}
+
 /// Copies the files [kind] chooses from [shots] into [destination], keeping
 /// each file's name. A file already there under that name is left alone and
 /// reported, and its original is not deleted.
 ///
 /// With [deleteAfter], an original is removed only once its copy is in place
-/// and the same size. [cancelled] is checked between files.
+/// and the same size. [cancelled] is checked between files. Progress reports
+/// file counts, bytes and a running transfer speed.
 Future<AlbumImportResult> albumCopyShots({
   required List<AlbumCameraShot> shots,
   required AlbumImportKind kind,
   required String destination,
   bool deleteAfter = false,
   bool Function()? cancelled,
-  void Function(int done, int total)? onProgress,
+  void Function(AlbumCopyProgress progress)? onProgress,
 }) async {
   await Directory(destination).create(recursive: true);
 
@@ -553,11 +580,48 @@ Future<AlbumImportResult> albumCopyShots({
     jobs.addAll(files);
   }
 
+  final sizes = <int>[];
+  var bytesTotal = 0;
+  for (final job in jobs) {
+    var size = 0;
+    try {
+      size = await job.file.length();
+    } on FileSystemException {
+      size = 0;
+    }
+    sizes.add(size);
+    bytesTotal += size;
+  }
+
   final errors = <String>[];
   var copied = 0;
   var deleted = 0;
   var stopped = false;
+  var bytesDone = 0;
+  final clock = Stopwatch()..start();
+  var lastReport = Duration.zero;
+
+  void report(int done) {
+    final elapsed = clock.elapsed;
+    final seconds = elapsed.inMicroseconds / 1e6;
+    onProgress?.call(
+      AlbumCopyProgress(
+        done: done,
+        total: jobs.length,
+        bytesDone: bytesDone,
+        bytesTotal: bytesTotal,
+        bytesPerSecond: bytesDone > 0
+            ? bytesDone / (seconds < 1e-6 ? 1e-6 : seconds)
+            : null,
+      ),
+    );
+    lastReport = elapsed;
+  }
+
+  report(0);
+
   for (var i = 0; i < jobs.length; i++) {
+    // Stop is checked between files, so the one in progress finishes.
     if (cancelled?.call() ?? false) {
       stopped = true;
       break;
@@ -565,22 +629,49 @@ Future<AlbumImportResult> albumCopyShots({
     final file = jobs[i];
     final source = file.file;
     final target = File(p.join(destination, file.fileName));
+    final expected = sizes[i];
     try {
       if (await target.exists()) {
         errors.add('${file.fileName} is already in the folder');
-        onProgress?.call(i + 1, jobs.length);
+        bytesDone += expected;
+        report(i + 1);
         continue;
       }
-      await source.copy(target.path);
+      await _copyFile(
+        source,
+        target,
+        onBytes: (n) {
+          bytesDone += n;
+          final elapsed = clock.elapsed;
+          if (elapsed - lastReport >= const Duration(milliseconds: 200)) {
+            final seconds = elapsed.inMicroseconds / 1e6;
+            onProgress?.call(
+              AlbumCopyProgress(
+                done: i,
+                total: jobs.length,
+                bytesDone: bytesDone,
+                bytesTotal: bytesTotal,
+                bytesPerSecond: bytesDone > 0
+                    ? bytesDone / (seconds < 1e-6 ? 1e-6 : seconds)
+                    : null,
+              ),
+            );
+            lastReport = elapsed;
+          }
+        },
+      );
       try {
         await target.setLastModified(await source.lastModified());
       } on FileSystemException {
         // The copy is in place; the date inside the file is what is shown.
       }
-      final same = await target.length() == await source.length();
+      final same = await target.length() == expected;
       if (!same) {
+        // Align the running total with the size we promised for this file.
+        final written = await target.length();
+        bytesDone += expected - written;
         errors.add('${file.fileName} was copied short');
-        onProgress?.call(i + 1, jobs.length);
+        report(i + 1);
         continue;
       }
       copied++;
@@ -596,11 +687,17 @@ Future<AlbumImportResult> albumCopyShots({
         }
       }
     } on FileSystemException catch (error) {
+      // Count the whole file against the total so the bar still reaches the end.
+      final written = await target.exists() ? await target.length() : 0;
+      bytesDone += expected - written;
+      try {
+        if (await target.exists()) await target.delete();
+      } catch (_) {}
       errors.add(
         '${file.fileName}: ${error.osError?.message ?? error.message}',
       );
     }
-    onProgress?.call(i + 1, jobs.length);
+    report(i + 1);
   }
   return AlbumImportResult(
     copied: copied,
@@ -609,4 +706,75 @@ Future<AlbumImportResult> albumCopyShots({
     stopped: stopped,
     errors: errors,
   );
+}
+
+/// Deletes the files [kind] chooses from [shots] on their cards. Nothing is
+/// copied. Shots with nothing of that kind are skipped. [cancelled] is
+/// checked between files.
+Future<AlbumImportResult> albumDeleteShots({
+  required List<AlbumCameraShot> shots,
+  required AlbumImportKind kind,
+  bool Function()? cancelled,
+  void Function(int done, int total)? onProgress,
+}) async {
+  final jobs = <AlbumPhoto>[];
+  var skipped = 0;
+  for (final shot in shots) {
+    final files = shot.filesFor(kind);
+    if (files.isEmpty) {
+      skipped++;
+      continue;
+    }
+    jobs.addAll(files);
+  }
+
+  final errors = <String>[];
+  var deleted = 0;
+  var stopped = false;
+  onProgress?.call(0, jobs.length);
+
+  for (var i = 0; i < jobs.length; i++) {
+    if (cancelled?.call() ?? false) {
+      stopped = true;
+      break;
+    }
+    final file = jobs[i];
+    try {
+      if (await file.file.exists()) {
+        await file.file.delete();
+        deleted++;
+      }
+    } on FileSystemException catch (error) {
+      errors.add(
+        '${file.fileName}: ${error.osError?.message ?? error.message}',
+      );
+    }
+    onProgress?.call(i + 1, jobs.length);
+  }
+
+  return AlbumImportResult(
+    copied: 0,
+    deleted: deleted,
+    skipped: skipped,
+    stopped: stopped,
+    errors: errors,
+  );
+}
+
+/// Streams [source] into [target], calling [onBytes] for each chunk.
+Future<void> _copyFile(
+  File source,
+  File target, {
+  required void Function(int bytes) onBytes,
+}) async {
+  final sink = target.openWrite();
+  try {
+    await for (final chunk in source.openRead()) {
+      sink.add(chunk);
+      onBytes(chunk.length);
+    }
+    await sink.flush();
+  } finally {
+    await sink.close();
+  }
 }

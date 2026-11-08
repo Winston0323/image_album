@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image_album/image_album.dart';
 import 'package:image_album/src/photo_info_panel.dart';
@@ -142,6 +143,67 @@ void main() {
 
     expect(find.text('1 / 1'), findsOneWidget);
     expect(find.text('A.JPG'), findsOneWidget);
+  });
+
+  testWidgets('the preview can delete the photo on screen', (tester) async {
+    await writePhoto(tester, 'A.JPG', modifiedAt: DateTime(2026, 7, 30, 12));
+    await writePhoto(tester, 'B.JPG', modifiedAt: DateTime(2026, 7, 29, 12));
+
+    await tester.pumpWidget(app());
+    await _settle(tester);
+
+    await tester.tap(find.byType(Image).first);
+    await _settle(tester);
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('1 / 2'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Delete (D)'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+    await _settle(tester);
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('1 / 1'), findsOneWidget);
+    expect(File('${temp.path}/A.JPG').existsSync(), isFalse);
+    expect(File('${temp.path}/B.JPG').existsSync(), isTrue);
+
+    await tester.tap(find.byTooltip('Delete (D)'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+    await _settle(tester);
+    await tester.pump(const Duration(milliseconds: 400));
+
+    // Last photo: the viewer closes.
+    expect(find.textContaining('/'), findsNothing);
+    expect(find.text('No photos'), findsOneWidget);
+  });
+
+  testWidgets('pressing D twice deletes the photo on screen', (tester) async {
+    await writePhoto(tester, 'A.JPG', modifiedAt: DateTime(2026, 7, 30, 12));
+    await writePhoto(tester, 'B.JPG', modifiedAt: DateTime(2026, 7, 29, 12));
+
+    await tester.pumpWidget(app());
+    await _settle(tester);
+
+    await tester.tap(find.byType(Image).first);
+    await _settle(tester);
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('1 / 2'), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyD);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('Delete 1 photo?'), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyD);
+    await _settle(tester);
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('1 / 1'), findsOneWidget);
+    expect(File('${temp.path}/A.JPG').existsSync(), isFalse);
+    expect(File('${temp.path}/B.JPG').existsSync(), isTrue);
   });
 
   testWidgets('the preview info button shows the photo details', (
