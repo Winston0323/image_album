@@ -293,10 +293,26 @@ class AlbumPhotoTile extends StatefulWidget {
     this.selectable = true,
     this.adjustment = const AlbumViewAdjustment(),
     this.library,
+    this.types,
+    this.badgeLabel,
+    this.badgeColor,
   });
 
   /// Where the thumbnail is kept. See [albumThumbnailProvider].
   final AlbumLibrary? library;
+
+  /// File-format labels shown at the tile's bottom-right corner. Defaults to
+  /// the photo's own type. Pass a shot's formats when several files share one
+  /// name, so a single tile reads `TIFF/JPG`.
+  final List<String>? types;
+
+  /// Text shown on the selection badge instead of the check mark, such as a
+  /// stitch group's number. Null shows the check mark.
+  final String? badgeLabel;
+
+  /// Fill color of the selection badge when [badgeLabel] is set, such as a
+  /// stitch group's color.
+  final Color? badgeColor;
 
   final AlbumPhoto photo;
 
@@ -337,6 +353,7 @@ class _AlbumPhotoTileState extends State<AlbumPhotoTile> {
     final scheme = Theme.of(context).colorScheme;
     final selected = widget.selected;
     final showBadge = widget.selectable && (widget.selecting || _hovered);
+    final types = widget.types ?? [widget.photo.fileType];
 
     return Semantics(
       label: widget.photo.fileName,
@@ -365,7 +382,13 @@ class _AlbumPhotoTileState extends State<AlbumPhotoTile> {
               duration: _quick,
               curve: Curves.easeOutCubic,
               child: ClipRRect(
-                borderRadius: BorderRadius.circular(selected ? 12 : 8),
+                // Stitched composites are outputs, not shots, so they sit in
+                // the grid with square corners instead of the usual rounding.
+                borderRadius: BorderRadius.circular(
+                  albumIsStitchedPath(widget.photo.file.path)
+                      ? 0
+                      : (selected ? 12 : 8),
+                ),
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
@@ -443,10 +466,19 @@ class _AlbumPhotoTileState extends State<AlbumPhotoTile> {
                           child: GestureDetector(
                             behavior: HitTestBehavior.opaque,
                             onTap: widget.onToggle,
-                            child: _CheckBadge(selected: selected),
+                            child: _CheckBadge(
+                              selected: selected,
+                              label: widget.badgeLabel,
+                              color: widget.badgeColor,
+                            ),
                           ),
                         ),
                       ),
+                    ),
+                    Positioned(
+                      right: 6,
+                      bottom: 6,
+                      child: _TileTypeBadge(types: types),
                     ),
                   ],
                 ),
@@ -460,29 +492,82 @@ class _AlbumPhotoTileState extends State<AlbumPhotoTile> {
 }
 
 class _CheckBadge extends StatelessWidget {
-  const _CheckBadge({required this.selected});
+  const _CheckBadge({required this.selected, this.label, this.color});
 
   final bool selected;
+
+  /// The text to show instead of the check mark. Null shows the check.
+  final String? label;
+
+  /// The badge's fill color when [label] is set. Null keeps the accent color.
+  final Color? color;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final fill = color ?? scheme.primary;
+    final onFill = color == null ? scheme.onPrimary : Colors.white;
     return AnimatedContainer(
       duration: const Duration(milliseconds: 150),
       width: 22,
       height: 22,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: selected ? scheme.primary : Colors.black.withValues(alpha: 0.28),
+        color: selected ? fill : Colors.black.withValues(alpha: 0.28),
         border: Border.all(
-          color: selected ? scheme.onPrimary : Colors.white,
+          color: selected ? onFill : Colors.white,
           width: 1.6,
         ),
         boxShadow: const [BoxShadow(blurRadius: 4, color: Color(0x40000000))],
       ),
-      child: selected
-          ? Icon(Icons.check_rounded, size: 15, color: scheme.onPrimary)
-          : null,
+      child: selected && label != null
+          ? Center(
+              child: Text(
+                label!,
+                style: TextStyle(
+                  color: onFill,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  height: 1,
+                ),
+              ),
+            )
+          : selected
+              ? Icon(Icons.check_rounded, size: 15, color: onFill)
+              : null,
+    );
+  }
+}
+
+/// The tile's file format(s), bottom right. One label for a single format;
+/// several joined with `/` when a shot holds more than one, such as `TIFF/JPG`.
+class _TileTypeBadge extends StatelessWidget {
+  const _TileTypeBadge({required this.types});
+
+  final List<String> types;
+
+  @override
+  Widget build(BuildContext context) {
+    if (types.isEmpty || (types.length == 1 && types.first.isEmpty)) {
+      return const SizedBox.shrink();
+    }
+    return IgnorePointer(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.55),
+          borderRadius: BorderRadius.circular(5),
+        ),
+        child: Text(
+          types.join('/'),
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 10.5,
+            fontWeight: FontWeight.w600,
+            height: 1,
+          ),
+        ),
+      ),
     );
   }
 }

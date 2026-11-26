@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image_album/image_album.dart';
+import 'package:image_album/src/album_justify.dart';
+import 'package:image_album/src/album_widgets.dart';
 import 'package:image_album/src/photo_info_panel.dart';
 
 /// A 1x1 transparent PNG. Real bytes (rather than junk) so `Image.file`
@@ -104,11 +106,14 @@ void main() {
       await tester.pumpWidget(app());
       await _settle(tester);
 
-      final tiles = find.byType(Image);
-      final top = tester.getTopLeft(tiles.first).dy;
+      final tiles = find.byType(AlbumPhotoTile);
+      final band = tester.getRect(tiles.first);
       final row = [
         for (final tile in tiles.evaluate())
-          if (tester.getTopLeft(find.byWidget(tile.widget)).dy == top) tile,
+          if (band.top - 1 <= tester.getCenter(find.byWidget(tile.widget)).dy &&
+              tester.getCenter(find.byWidget(tile.widget)).dy <=
+                  band.bottom + 1)
+            tile,
       ];
       return (row.length, tester.getSize(tiles.first).width);
     }
@@ -120,14 +125,38 @@ void main() {
       expect(tileWidth, lessThan(albumTileMaxExtent * 1.05));
     });
 
-    testWidgets('a desktop-width window adds columns, not bigger tiles', (
+    testWidgets('a desktop-width window fits more photos at the row height', (
       tester,
     ) async {
       final (columns, tileWidth) = await firstRow(tester, 1600);
 
-      expect(columns, greaterThanOrEqualTo(10));
-      expect(tileWidth, lessThan(albumTileMaxExtent * 1.05));
+      expect(columns, greaterThan(3));
+      expect(tileWidth, lessThanOrEqualTo(albumJustifyRowTarget));
     });
+  });
+
+  testWidgets('only rows near the viewport are built', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(400, 600);
+    addTearDown(tester.view.reset);
+    for (var i = 0; i < 80; i++) {
+      await writePhoto(
+        tester,
+        'P${i.toString().padLeft(2, '0')}.JPG',
+        modifiedAt: DateTime(2026, 7, 30, 12).subtract(Duration(minutes: i)),
+      );
+    }
+
+    await tester.pumpWidget(app());
+    await _settle(tester);
+
+    expect(find.text('80 photos'), findsOneWidget);
+    final mounted = find
+        .byType(AlbumPhotoTile, skipOffstage: false)
+        .evaluate()
+        .length;
+    expect(mounted, greaterThan(0));
+    expect(mounted, lessThan(80));
   });
 
   testWidgets('tapping a photo opens the full-screen swipe preview', (

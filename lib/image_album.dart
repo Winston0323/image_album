@@ -21,4 +21,5 @@ export 'src/album_rename.dart'
         albumRenameImages,
         albumRenameImagesInBackground,
         albumSanitizePrefix;
+export 'src/album_stitcher.dart';
 export 'src/image_album.dart';

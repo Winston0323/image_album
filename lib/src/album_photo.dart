@@ -60,6 +60,77 @@ String albumFileType(String path) {
   };
 }
 
+/// The formats of the shot [photo] belongs to: its own file type first, then
+/// the types of any sibling files that share its name but a different
+/// extension — a JPEG kept beside its TIFF, say. Upper-case labels,
+/// deduplicated (so `.jpg` and `.jpeg` count once). With no siblings this is
+/// just the photo's own type.
+///
+/// A sibling may sit in a `JPG` subfolder, the layout Lightroom exports use:
+/// the folder is folded into its parent, so `scan.tif` and `JPG/scan.jpg` read
+/// as one shot. [photos] must hold every file to look through, including ones
+/// the grid itself may have collapsed away.
+List<String> albumShotFileTypes(
+  AlbumPhoto photo,
+  Iterable<AlbumPhoto> photos,
+) {
+  final own = photo.fileType;
+  final types = <String>[if (own.isNotEmpty) own];
+  final base = p.basenameWithoutExtension(photo.file.path).toLowerCase();
+  final dir = _albumShotDir(photo.file.path);
+  for (final other in photos) {
+    if (other.file.path == photo.file.path) continue;
+    final type = other.fileType;
+    if (type.isEmpty || types.contains(type)) continue;
+    if (_albumShotDir(other.file.path) != dir) continue;
+    if (p.basenameWithoutExtension(other.file.path).toLowerCase() != base) {
+      continue;
+    }
+    types.add(type);
+  }
+  return types;
+}
+
+/// The folder a shot's files are matched within. A `JPG` export folder folds
+/// into its parent so an original and its export belong to the same shot.
+String _albumShotDir(String path) {
+  final parent = p.dirname(path);
+  if (p.basename(parent).toLowerCase() == 'jpg') {
+    return p.dirname(parent);
+  }
+  return parent;
+}
+
+/// An O(1) lookup of [albumShotFileTypes] for every photo in [photos], keyed
+/// by [AlbumPhoto.id]. Building the index is a single O(n) pass; the grid uses
+/// it because it asks for a shot's formats once per tile.
+Map<String, List<String>> albumShotFileTypesIndex(Iterable<AlbumPhoto> photos) {
+  final byShot = <String, List<AlbumPhoto>>{};
+  for (final photo in photos) {
+    final key =
+        '${_albumShotDir(photo.file.path)}/'
+        '${p.basenameWithoutExtension(photo.file.path).toLowerCase()}';
+    byShot.putIfAbsent(key, () => []).add(photo);
+  }
+  final index = <String, List<String>>{};
+  for (final group in byShot.values) {
+    final formats = <String>[];
+    for (final photo in group) {
+      final type = photo.fileType;
+      if (type.isNotEmpty && !formats.contains(type)) formats.add(type);
+    }
+    for (final photo in group) {
+      final own = photo.fileType;
+      index[photo.id] = List.unmodifiable([
+        if (own.isNotEmpty) own,
+        for (final format in formats)
+          if (format != own) format,
+      ]);
+    }
+  }
+  return index;
+}
+
 /// One day's worth of photos, newest day first when produced by [groupAlbumByDay].
 class AlbumDaySection {
   const AlbumDaySection({required this.day, required this.photos});
@@ -266,6 +337,9 @@ Future<List<AlbumPhoto>> readAlbumIndex(
 Future<List<Object>> _readIndexRows(String path) async {
   final entries = (await _readDateCache(File(path))).entries.toList()
     ..sort((a, b) {
+      final aStitched = albumIsStitchedPath(a.key);
+      final bStitched = albumIsStitchedPath(b.key);
+      if (aStitched != bStitched) return aStitched ? 1 : -1;
       final byDate = b.value.takenAt.compareTo(a.value.takenAt);
       return byDate != 0 ? byDate : a.key.compareTo(b.key);
     });
@@ -285,6 +359,9 @@ Future<List<Object>?> _readCatalogRows(String path, bool recursive) async {
         for (final entry in catalog.inScope(recursive))
           (albumCatalogPath(path, entry.key), entry.value.takenAt),
       ]..sort((a, b) {
+        final aStitched = albumIsStitchedPath(a.$1);
+        final bStitched = albumIsStitchedPath(b.$1);
+        if (aStitched != bStitched) return aStitched ? 1 : -1;
         final byDate = b.$2.compareTo(a.$2);
         return byDate != 0 ? byDate : a.$1.compareTo(b.$1);
       });
@@ -502,7 +579,17 @@ Future<void> _scanAlbum(
   }
 }
 
+/// Whether [path] is a stitched composite the app wrote out (`stitched_H_…` /
+/// `stitched_V_…`), rather than a shot the camera took. Stitched files still
+/// scan as photos, but they sort below real shots and never fill a preview.
+bool albumIsStitchedPath(String path) =>
+    p.basename(path).toLowerCase().startsWith('stitched_');
+
 int _newestFirst(AlbumPhoto a, AlbumPhoto b) {
+  // Stitched composites are outputs, so they sit below every real shot.
+  final aStitched = albumIsStitchedPath(a.file.path);
+  final bStitched = albumIsStitchedPath(b.file.path);
+  if (aStitched != bStitched) return aStitched ? 1 : -1;
   final byDate = b.takenAt.compareTo(a.takenAt);
   if (byDate != 0) return byDate;
   return a.file.path.compareTo(b.file.path);

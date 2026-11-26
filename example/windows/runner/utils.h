@@ -8,9 +8,12 @@
 // it for both the runner and the Flutter library.
 void CreateAndAttachConsole();
 
-// Drops the Windows engine's accessibility-tree spam. The engine logs
-// "Failed to update ui::AXTree" after a node leaves the tree; that is not
-// an album failure. Every other stderr line is kept.
+// Drops debug-only framework chatter from stderr so real album errors stay
+// visible: the Windows engine's accessibility-tree spam ("Failed to update
+// ui::AXTree"), hit tests on render boxes mid-layout, and the MouseTracker
+// "_debugDuringDeviceUpdate" assertion that fires when a pointer device
+// update races a frame build. None crash the app and none appear in release
+// builds. Every other stderr line is kept.
 void SuppressAccessibilityTreeLog();
 
 // Takes a null-terminated wchar_t* encoded in UTF-16 and returns a std::string

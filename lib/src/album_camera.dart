@@ -69,6 +69,17 @@ class AlbumCameraShot {
 
   bool get paired => picture != null && raw != null;
 
+  /// The distinct formats this shot holds, in display order: the picture first,
+  /// then the raw, then anything else.
+  List<String> get fileTypes {
+    final types = <String>[];
+    for (final file in files) {
+      final type = file.fileType;
+      if (type.isNotEmpty && !types.contains(type)) types.add(type);
+    }
+    return types;
+  }
+
   /// The files [kind] copies. Empty when the shot has none of that kind.
   List<AlbumPhoto> filesFor(AlbumImportKind kind) => switch (kind) {
     AlbumImportKind.both => files,

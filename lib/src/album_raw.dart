@@ -292,15 +292,27 @@ img.Image _bake(img.Image image, int orientation) {
   return img.bakeOrientation(image);
 }
 
+/// The long side a scan larger than [_maxDecodePixels] is read at when no
+/// smaller size is asked for: enough to zoom into, but not the whole picture.
+const int _hugeFallbackSide = 6000;
+
 Future<Uint8List?> _decodeTiff(File file, int orientation, int? maxSide) async {
   final size = await albumTiffSize(file);
-  if (size != null && size.width * size.height > _maxDecodePixels) return null;
+  final huge = size != null && size.width * size.height > _maxDecodePixels;
 
-  // The decoder of the image package reads the colours of a TIFF that keeps
-  // them in separate planes (what some scanners and converters write) as
-  // black or grey, so those are read here.
-  final decoded =
-      await _decodeStripTiff(file) ?? img.decodeTiff(await file.readAsBytes());
+  img.Image? decoded;
+  if (huge) {
+    // Too large to decode whole: read it already small. A full-size decode of
+    // such a scan is never attempted, so it is shown shrunk rather than
+    // risking memory. With no size, a generous cap keeps zooming usable.
+    decoded = await albumSampleTiff(file, maxSide ?? _hugeFallbackSide);
+  } else {
+    // The decoder of the image package reads the colours of a TIFF that keeps
+    // them in separate planes (what some scanners and converters write) as
+    // black or grey, so those are read here.
+    decoded = await _decodeStripTiff(file) ??
+        img.decodeTiff(await file.readAsBytes());
+  }
   if (decoded == null) return null;
 
   // Whatever the decoder produced, down to 8 bits of colour, with a channel
@@ -313,7 +325,7 @@ Future<Uint8List?> _decodeTiff(File file, int orientation, int? maxSide) async {
     noAnimation: true,
   );
 
-  if (maxSide != null && maxSide > 0) {
+  if (!huge && maxSide != null && maxSide > 0) {
     final longest = image.width > image.height ? image.width : image.height;
     if (longest > maxSide) {
       image = image.width >= image.height
@@ -468,6 +480,99 @@ Future<img.Image?> _decodeStripTiff(File file) async {
       height: height,
       bytes: pixels.buffer,
       numChannels: channels,
+    );
+  } catch (_) {
+    return null;
+  } finally {
+    await raf.close();
+  }
+}
+
+/// A scan too large to decode whole, read at most [maxSide] pixels on its long
+/// side. Rows and columns are sampled while reading, so the full picture is
+/// never held in memory. Handles the layouts big scans come in: interleaved,
+/// uncompressed greyscale or RGB(A), 8 or 16 bits a sample, in strips.
+Future<img.Image?> albumSampleTiff(File file, int maxSide) async {
+  final raf = await file.open();
+  try {
+    final tiff = await _Tiff.open(raf);
+    if (tiff == null) return null;
+    final ifd = await tiff.readIfd(tiff.firstIfd);
+    if (ifd == null) return null;
+
+    Future<int?> one(int tag) => tiff.integer(ifd.entries[tag]);
+
+    final width = await one(0x0100);
+    final height = await one(0x0101);
+    final samples = await one(0x0115) ?? 1;
+    if (width == null || height == null || width < 1 || height < 1) return null;
+    // Only uncompressed, interleaved pictures are sampled; anything else is
+    // left to the regular decoder, which refuses a picture this large.
+    if ((await one(0x0103) ?? 1) != 1) return null;
+    if ((await one(0x011C) ?? 1) != 1) return null;
+    final photometric = await one(0x0106);
+    final gray = photometric == 0 || photometric == 1;
+    if (gray ? samples != 1 : (photometric != 2 || samples < 3 || samples > 4)) {
+      return null;
+    }
+
+    final bits = await tiff.integers(ifd.entries[0x0102], 4);
+    final needed = gray ? 1 : samples;
+    if (bits.length < needed || bits.any((b) => b != bits.first)) return null;
+    final bytesPerSample = switch (bits.first) { 8 => 1, 16 => 2, _ => 0 };
+    if (bytesPerSample == 0) return null;
+
+    final rowsPerStrip = await one(0x0116) ?? height;
+    if (rowsPerStrip < 1) return null;
+    final strips = (height + rowsPerStrip - 1) ~/ rowsPerStrip;
+    final offsets = await tiff.integers(ifd.entries[0x0111], 1 << 20);
+    final counts = await tiff.integers(ifd.entries[0x0117], 1 << 20);
+    if (offsets.length < strips || counts.length < strips) return null;
+
+    // The sampled size, never larger than the source.
+    final longest = width > height ? width : height;
+    final scale = longest / maxSide;
+    final outW = scale <= 1 ? width : math.max(1, (width / scale).round());
+    final outH = scale <= 1 ? height : math.max(1, (height / scale).round());
+
+    final rowBytes = width * samples * bytesPerSample;
+    // Sixteen-bit samples are cut to their top byte.
+    final high = bytesPerSample == 1 ? 0 : (tiff.isLittle ? 1 : 0);
+    final srcRow = Uint8List(rowBytes);
+    final out = Uint8List(outW * outH * 3);
+
+    for (var oy = 0; oy < outH; oy++) {
+      final sy = (oy * height) ~/ outH;
+      final strip = sy ~/ rowsPerStrip;
+      final start = offsets[strip] + (sy - strip * rowsPerStrip) * rowBytes;
+      if (start < 0 || start + rowBytes > tiff.length) return null;
+      await raf.setPosition(start);
+      final got = await raf.read(rowBytes);
+      if (got.length < rowBytes) return null;
+      srcRow.setRange(0, rowBytes, got);
+
+      final oRow = oy * outW * 3;
+      for (var ox = 0; ox < outW; ox++) {
+        final sx = (ox * width) ~/ outW;
+        final si = sx * samples * bytesPerSample + high;
+        final o = oRow + ox * 3;
+        if (gray) {
+          final v = srcRow[si];
+          out[o] = v;
+          out[o + 1] = v;
+          out[o + 2] = v;
+        } else {
+          out[o] = srcRow[si];
+          out[o + 1] = srcRow[si + bytesPerSample];
+          out[o + 2] = srcRow[si + bytesPerSample * 2];
+        }
+      }
+    }
+    return img.Image.fromBytes(
+      width: outW,
+      height: outH,
+      bytes: out.buffer,
+      numChannels: 3,
     );
   } catch (_) {
     return null;

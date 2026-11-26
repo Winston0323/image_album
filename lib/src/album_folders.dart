@@ -50,7 +50,17 @@ class AlbumFolderNode {
 }
 
 /// Builds the folder tree for [photos], rooted at [root].
-AlbumFolderNode buildAlbumFolderTree(List<AlbumPhoto> photos, String root) {
+AlbumFolderNode buildAlbumFolderTree(List<AlbumPhoto> photos, String root) =>
+    buildAlbumFolderTreeFromPaths([
+      for (final photo in photos) photo.file.path,
+    ], root);
+
+/// Builds a folder tree from photo file paths. Unlike [buildAlbumFolderTree],
+/// this takes only sendable values, so a large tree can be built on a worker.
+AlbumFolderNode buildAlbumFolderTreeFromPaths(
+  List<String> photoPaths,
+  String root,
+) {
   final rootPath = p.normalize(root);
   final rootName = p.basename(rootPath);
   final top = AlbumFolderNode._(
@@ -82,8 +92,8 @@ AlbumFolderNode buildAlbumFolderTree(List<AlbumPhoto> photos, String root) {
     return node;
   }
 
-  for (final photo in photos) {
-    final raw = p.dirname(photo.file.path);
+  for (final path in photoPaths) {
+    final raw = p.dirname(path);
     final node = byRawDir.putIfAbsent(raw, () => nodeFor(p.normalize(raw)));
     node.directCount++;
   }
@@ -357,6 +367,7 @@ class AlbumFolderPanel extends StatefulWidget {
     this.selectedFilmKey,
     this.onFilmKindTap,
     this.onAssignFilmKind,
+    this.onImportFilmKind,
     this.onClearFilmKind,
     this.openFilmFolders = const [],
     this.filmPaths = const [],
@@ -394,6 +405,9 @@ class AlbumFolderPanel extends StatefulWidget {
 
   /// Right-click: the user picks the folder for this kind.
   final ValueChanged<AlbumFilmKind>? onAssignFilmKind;
+
+  /// Right-click: import a zip or folder of scans into this kind's folder.
+  final ValueChanged<AlbumFilmKind>? onImportFilmKind;
 
   /// Right-click: drop the folder linked to this kind. The pictures stay.
   final ValueChanged<AlbumFilmKind>? onClearFilmKind;
@@ -561,7 +575,9 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
       ),
       items: [
         if (widget.onAssignFilmKind != null)
-          const PopupMenuItem(value: 'set', child: Text('Set folder…')),
+          const PopupMenuItem(value: 'set', child: Text('Set folder')),
+        if (widget.onImportFilmKind != null)
+          const PopupMenuItem(value: 'import', child: Text('Import')),
         if (located && widget.onClearFilmKind != null)
           const PopupMenuItem(value: 'clear', child: Text('Clear folder')),
       ],
@@ -570,6 +586,8 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
     switch (choice) {
       case 'set':
         widget.onAssignFilmKind?.call(kind);
+      case 'import':
+        widget.onImportFilmKind?.call(kind);
       case 'clear':
         widget.onClearFilmKind?.call(kind);
     }
@@ -911,6 +929,7 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
                                 : () => widget.onFilmKindTap!(kind),
                             onSecondaryTapUp:
                                 widget.onAssignFilmKind == null &&
+                                    widget.onImportFilmKind == null &&
                                     widget.onClearFilmKind == null
                                 ? null
                                 : (details) => _filmKindMenu(
@@ -920,6 +939,7 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
                                   ),
                             onLongPress:
                                 widget.onAssignFilmKind == null &&
+                                    widget.onImportFilmKind == null &&
                                     widget.onClearFilmKind == null
                                 ? null
                                 : () => _filmKindMenu(
@@ -1000,10 +1020,13 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final states = <String, AlbumFolderState>{
-      for (final root in widget.roots)
-        ...albumFolderStates(root, widget.excluded),
-    };
+    // The common case needs no tree walk at all: every row is included.
+    final states = widget.excluded.isEmpty
+        ? const <String, AlbumFolderState>{}
+        : <String, AlbumFolderState>{
+            for (final root in widget.roots)
+              ...albumFolderStates(root, widget.excluded),
+          };
     final anyHidden = states.values.any((s) => s != AlbumFolderState.included);
     final labels = _labels();
     final rows = _rows();
@@ -1031,18 +1054,6 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
                     onPressed: () => widget.onChanged(const {}),
                     child: const Text('Show all'),
                   ),
-                IconButton(
-                  tooltip: 'Film list',
-                  visualDensity: VisualDensity.compact,
-                  onPressed: () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => const AlbumFilmListPage(),
-                      ),
-                    );
-                  },
-                  icon: const Icon(Icons.movie_creation_outlined),
-                ),
                 IconButton(
                   tooltip: 'Cameras',
                   visualDensity: VisualDensity.compact,
@@ -1141,7 +1152,8 @@ class _AlbumFolderPanelState extends State<AlbumFolderPanel> {
                       itemCount: rows.length,
                       itemBuilder: (context, index) {
                         final node = rows[index];
-                        final state = states[node.path]!;
+                        final state =
+                            states[node.path] ?? AlbumFolderState.included;
                         final remove = widget.onRemoveFolder;
                         final marked = widget.highlighted ?? widget.focused;
                         return _FolderRow(

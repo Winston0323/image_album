@@ -213,9 +213,9 @@ void main() {
       expect(picked(tester), [1, 2, 3, 4, 5, 6]);
     });
 
-    /// A spot in the second row past its last tile, where nothing is.
+    /// A spot below the last justified row, where no photo or control is.
     Offset blankSpot(WidgetTester tester) =>
-        tester.getRect(tile(11)).centerRight + const Offset(70, 0);
+        tester.getRect(tile(11)).bottomCenter + const Offset(0, 40);
 
     testWidgets('clicking blank space unpicks everything', (tester) async {
       await openAlbum(tester);
@@ -269,6 +269,7 @@ void main() {
         center(tester, 9),
         kind: PointerDeviceKind.mouse,
       );
+      await gesture.moveTo(center(tester, 11));
       await gesture.moveTo(blankSpot(tester));
       await gesture.up();
       await tester.pump();

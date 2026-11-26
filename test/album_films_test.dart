@@ -27,6 +27,10 @@ void main() {
       albumFilmFolderName('Kodak Vision3 250D (5207)'),
       'KODAK_VISION3_5207',
     );
+    expect(
+      albumFilmFolderName('Kodak Vision3 200T (5213)'),
+      'KODAK_VISION3_5213',
+    );
     expect(albumFilmFolderName('Ilford HP5 Plus'), 'ILFORD_HP5_PLUS');
     expect(albumFilmFolderName('Fujifilm 200'), 'FUJIFILM_200');
   });

@@ -33,6 +33,13 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.13.1"
+  bmp2tif_app:
+    dependency: transitive
+    description:
+      path: "../../Bmp2Tif_Tool"
+      relative: true
+    source: path
+    version: "1.0.0+1"
   boolean_selector:
     dependency: transitive
     description:
@@ -113,6 +120,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.8.0"
+  desktop_drop:
+    dependency: transitive
+    description:
+      name: desktop_drop
+      sha256: aa1e797255bfbc76f9eb5aa4f61e5b68dbf69962ab1be6495816d2f251bc0d1f
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.7.1"
   exif:
     dependency: transitive
     description:
@@ -217,7 +232,7 @@ packages:
     source: hosted
     version: "2.0.2"
   image:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: image
       sha256: "89ed75b2f8231fe676808c5564f9590d728024ded7ac782a7ed8474f1c95b72a"
@@ -564,6 +579,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.4.0"
+  universal_platform:
+    dependency: transitive
+    description:
+      name: universal_platform
+      sha256: "64e16458a0ea9b99260ceb5467a214c1f298d647c659af1bff6d3bf82536b1ec"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.1.0"
   vector_math:
     dependency: transitive
     description:

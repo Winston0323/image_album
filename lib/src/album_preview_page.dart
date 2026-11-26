@@ -19,6 +19,12 @@ import 'photo_info_panel.dart';
 /// Scale a double-tap zooms to.
 const double _doubleTapScale = 2.5;
 
+/// How much of the viewport height the fitted photo may fill. Keeps a small
+/// margin above and below a portrait photo instead of running it edge to edge.
+/// Kept in sync with the flight target in album_preview_zoom.dart, so the
+/// open/close motion lands where the photo sits instead of overshooting.
+const double _fitVerticalFraction = 0.9;
+
 /// Image cache budget while a preview is open. Full-resolution photos are
 /// large; keep room for the current shot and a neighbor on each side.
 const int _previewCacheBytes = 512 << 20;
@@ -1118,7 +1124,9 @@ class _PreviewPhotoState extends State<_PreviewPhoto>
   }
 
   /// Lays the photo out so one file pixel is one physical pixel, then scales
-  /// that down until it fits [viewport].
+  /// that down until it fits [viewport]. The vertical extent is capped at
+  /// [_fitVerticalFraction] of the viewport, so a portrait photo keeps a small
+  /// margin above and below rather than touching both edges.
   void _fitToViewport() {
     final pixels = _pixels;
     final viewport = _viewport;
@@ -1128,7 +1136,10 @@ class _PreviewPhotoState extends State<_PreviewPhoto>
     final childW = pixels.width / dpr;
     final childH = pixels.height / dpr;
     if (childW <= 0 || childH <= 0) return;
-    final fit = math.min(viewport.width / childW, viewport.height / childH);
+    final fit = math.min(
+      viewport.width / childW,
+      viewport.height / childH * _fitVerticalFraction,
+    );
     if (!fit.isFinite || fit <= 0) return;
     _fitScale = fit;
     final dx = (viewport.width - childW * fit) / 2;

@@ -896,6 +896,96 @@ void main() {
     });
   });
 
+  group('a too-large scan is sampled while read', () {
+    test('interleaved 16-bit RGB, down to the asked size', () async {
+      final width = 160;
+      final height = 120;
+      // Nearest-neighbour sampling picks every 4th pixel, so the plane values
+      // are built so each sampled pixel is the one at (x*4, y*4).
+      final r = Uint8List(width * height);
+      final g = Uint8List(width * height);
+      final b = Uint8List(width * height);
+      for (var y = 0; y < height; y++) {
+        for (var x = 0; x < width; x++) {
+          final at = y * width + x;
+          r[at] = (x * 2) % 256;
+          g[at] = (y * 3) % 256;
+          b[at] = 99;
+        }
+      }
+      final file = await write(
+        'a.tif',
+        _planarTiff(
+          width: width,
+          height: height,
+          planes: [r, g, b],
+          compression: 1,
+          rowsPerStrip: 50,
+          interleaved: true,
+          sixteenBit: true,
+        ),
+      );
+
+      final sampled = (await albumSampleTiff(file, 40))!;
+      expect(sampled.width, 40);
+      expect(sampled.height, 30);
+      for (final pixel in sampled) {
+        final sx = pixel.x * 4;
+        final sy = pixel.y * 4;
+        expect(pixel.r, (sx * 2) % 256, reason: 'pixel ${pixel.x},${pixel.y}');
+        expect(pixel.g, (sy * 3) % 256, reason: 'pixel ${pixel.x},${pixel.y}');
+        expect(pixel.b, 99, reason: 'pixel ${pixel.x},${pixel.y}');
+      }
+    });
+
+    test('greyscale is made into three equal channels', () async {
+      final width = 80;
+      final height = 60;
+      final plane = Uint8List(width * height);
+      for (var i = 0; i < plane.length; i++) {
+        plane[i] = (i % 5) * 40;
+      }
+      final file = await write(
+        'g.tif',
+        _planarTiff(
+          width: width,
+          height: height,
+          planes: [plane],
+          compression: 1,
+          rowsPerStrip: 60,
+          interleaved: true,
+        ),
+      );
+
+      final sampled = (await albumSampleTiff(file, 20))!;
+      expect(sampled.width, 20);
+      expect(sampled.height, 15);
+      for (final pixel in sampled) {
+        expect(pixel.r, pixel.g);
+        expect(pixel.g, pixel.b);
+      }
+    });
+
+    test('a compressed scan is not sampled', () async {
+      final width = 40;
+      final height = 40;
+      final plane = Uint8List(width * height);
+      final file = await write(
+        'z.tif',
+        _planarTiff(
+          width: width,
+          height: height,
+          planes: [plane],
+          compression: 8,
+          rowsPerStrip: 40,
+          interleaved: true,
+        ),
+      );
+
+      expect(await albumSampleTiff(file, 10), isNull);
+    });
+  });
+
   group('drawing them', () {
     Future<ui.Image> resolve(
       WidgetTester tester,

@@ -9,6 +9,9 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  archive: ^4.5.2
+  bmp2tif_app:
+    path: ../Bmp2Tif_Tool
   exif: ^3.3.0
   path: ^1.9.1
   image: ^4.12.0

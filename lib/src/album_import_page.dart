@@ -4,6 +4,7 @@ import 'package:path/path.dart' as p;
 
 import 'album_camera.dart';
 import 'album_drag_select.dart';
+import 'album_justify.dart';
 import 'album_photo.dart';
 import 'album_images.dart';
 import 'album_preview_page.dart';
@@ -50,6 +51,10 @@ class _AlbumImportPageState extends State<AlbumImportPage> {
   List<AlbumCameraShot>? _shots;
   String? _error;
   var _reading = true;
+
+  /// Photo aspects for the justified row layout: photos keep their own
+  /// ratio, measured from their thumbnails, square until then.
+  final AlbumAspectStore _aspects = AlbumAspectStore();
 
   /// True while a camera folder is still being looked for. The files are
   /// listed only after that, so the path is on screen before any photo is.
@@ -109,6 +114,7 @@ class _AlbumImportPageState extends State<AlbumImportPage> {
 
   @override
   void dispose() {
+    _aspects.dispose();
     _gridController.dispose();
     _name.dispose();
     super.dispose();
@@ -1066,71 +1072,124 @@ class _AlbumImportPageState extends State<AlbumImportPage> {
           child: GestureDetector(
             behavior: HitTestBehavior.translucent,
             onTap: _clickBlank,
-            child: CustomScrollView(
-              controller: _gridController,
-              slivers: [
-                for (final section in sections)
-                  SliverMainAxisGroup(
-                    slivers: [
-                      SliverPersistentHeader(
-                        pinned: true,
-                        delegate: AlbumDayHeaderDelegate(
-                          section,
-                          height: headerHeight,
-                          selected: _dayChecked(section, shots),
-                          onSelect: () => _selectDay(section, shots),
+            // Row layouts follow the photo aspects, which arrive as thumbnails
+            // are measured; rebuild the scroll view as they come in.
+            child: ListenableBuilder(
+              listenable: _aspects,
+              builder: (context, _) => CustomScrollView(
+                controller: _gridController,
+                slivers: [
+                  for (final section in sections)
+                    SliverMainAxisGroup(
+                      slivers: [
+                        SliverPersistentHeader(
+                          pinned: true,
+                          delegate: AlbumDayHeaderDelegate(
+                            section,
+                            height: headerHeight,
+                            selected: _dayChecked(section, shots),
+                            onSelect: () => _selectDay(section, shots),
+                          ),
                         ),
-                      ),
-                      SliverPadding(
-                        padding: const EdgeInsets.fromLTRB(10, 2, 10, 8),
-                        sliver: SliverGrid.builder(
-                          gridDelegate:
-                              const SliverGridDelegateWithMaxCrossAxisExtent(
-                                // The same size the album's own grid uses.
-                                maxCrossAxisExtent: 140,
-                                mainAxisSpacing: 4,
-                                crossAxisSpacing: 4,
-                              ),
-                          itemCount: section.photos.length,
-                          itemBuilder: (context, index) {
-                            final photo = section.photos[index];
-                            final shot = _shotOf(shots, photo)!;
-                            final at = flat.indexOf(photo);
-                            return AlbumPhotoTile(
-                              key: ValueKey(shot.display.file.path),
-                              photo: photo,
-                              selecting: true,
-                              selected: _picked.contains(
-                                shot.display.file.path,
-                              ),
-                              onTap: (origin) => _click(
-                                shots,
-                                flat,
-                                shot,
-                                at,
-                                openIfIdle: true,
-                                origin: origin,
-                              ),
-                              onToggle: () => _click(
-                                shots,
-                                flat,
-                                shot,
-                                at,
-                                openIfIdle: false,
-                              ),
-                              onLongPress: () => _longPress(shot),
-                            );
-                          },
+                        SliverPadding(
+                          padding: const EdgeInsets.fromLTRB(10, 2, 10, 8),
+                          // Justified rows, as the album's own grid lays them
+                          // out: each photo keeps its own aspect ratio and
+                          // rows are scaled to fill the width, rather than
+                          // every photo being cropped to a square.
+                          sliver: SliverLayoutBuilder(
+                            builder: (context, constraints) {
+                              final rows = albumJustifyRows(
+                                section.photos.length,
+                                (index) =>
+                                    _aspects.aspectOf(section.photos[index]),
+                                maxWidth: constraints.crossAxisExtent,
+                              );
+                              return SliverList.builder(
+                                itemCount: rows.length,
+                                itemBuilder: (context, rowIndex) {
+                                  final row = rows[rowIndex];
+                                  return Padding(
+                                    padding: const EdgeInsets.only(
+                                      bottom: albumJustifySpacing,
+                                    ),
+                                    child: SizedBox(
+                                      height: row.height,
+                                      child: Row(
+                                        children: [
+                                          for (
+                                            var j = 0;
+                                            j < row.count;
+                                            j++
+                                          ) ...[
+                                            if (j > 0)
+                                              const SizedBox(
+                                                width: albumJustifySpacing,
+                                              ),
+                                            _rowSlot(
+                                              row,
+                                              j,
+                                              _aspects.aspectOf(
+                                                section.photos[row.start + j],
+                                              ),
+                                              _importTile(
+                                                shots,
+                                                flat,
+                                                section,
+                                                row.start + j,
+                                              ),
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                    ),
+                                  );
+                                },
+                              );
+                            },
+                          ),
                         ),
-                      ),
-                    ],
-                  ),
-                const SliverToBoxAdapter(child: SizedBox(height: 24)),
-              ],
+                      ],
+                    ),
+                  const SliverToBoxAdapter(child: SizedBox(height: 24)),
+                ],
+              ),
             ),
           ),
         ),
       ),
+    );
+  }
+
+  /// Slot [j] of justified [row], as wide as [aspect] makes it, holding
+  /// [tile]. The last slot of a filled row stretches over the rounding left
+  /// behind; the trailing partial row is left-aligned, not stretched.
+  Widget _rowSlot(AlbumJustifiedRow row, int j, double aspect, Widget tile) {
+    if (row.filled && j == row.count - 1) return Expanded(child: tile);
+    return SizedBox(width: row.widthOf(j, aspect), child: tile);
+  }
+
+  /// The tile for photo [index] of [section], as the justified row layout
+  /// places it. [flat] is the grid's photo order, [shots] the camera shots.
+  Widget _importTile(
+    List<AlbumCameraShot> shots,
+    List<AlbumPhoto> flat,
+    AlbumDaySection section,
+    int index,
+  ) {
+    final photo = section.photos[index];
+    final shot = _shotOf(shots, photo)!;
+    final at = flat.indexOf(photo);
+    return AlbumPhotoTile(
+      key: ValueKey(shot.display.file.path),
+      photo: photo,
+      types: shot.fileTypes,
+      selecting: true,
+      selected: _picked.contains(shot.display.file.path),
+      onTap: (origin) =>
+          _click(shots, flat, shot, at, openIfIdle: true, origin: origin),
+      onToggle: () => _click(shots, flat, shot, at, openIfIdle: false),
+      onLongPress: () => _longPress(shot),
     );
   }
 }

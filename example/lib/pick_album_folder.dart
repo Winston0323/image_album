@@ -5,15 +5,14 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:windows_file_picker/windows_file_picker.dart';
 
 /// Lets the user choose a folder and returns its path.
 ///
 /// Windows opens the system folder dialog. Android opens the system
 /// document-tree picker and returns a real directory path the album can
 /// list. Returns null when the user cancels or access is denied.
-/// The last folder this picker showed. The system folder window is not used
-/// on Windows: it reports that it cannot open a folder after that folder is
-/// renamed, and then refuses to open at all.
+/// The last folder this picker showed, used as the fallback start location.
 String? _lastFolder;
 
 Future<String?> pickAlbumFolder(
@@ -48,13 +47,23 @@ Future<String?> _pickWindowsFolder(
       Platform.environment['USERPROFILE'] ??
       r'C:\';
   if (!context.mounted) return null;
-  final path = await showDialog<String>(
-    context: context,
-    builder: (context) => _WindowsFolderDialog(start: start),
-  );
-  if (path != null && path.isNotEmpty) _lastFolder = path;
-  if (!context.mounted) return null;
-  return _usableFolder(context, path);
+
+  // Windows：注册 file_picker 的实现后打开系统自带的文件夹选择对话框
+  // （IFileOpenDialog + FOS_PICKFOLDERS，资源管理器风格）。
+  FilePickerWindows.registerWith();
+  try {
+    final path = await FilePicker.getDirectoryPath(
+      dialogTitle: 'Choose a photo folder',
+      initialDirectory: start,
+    );
+    if (path != null && path.isNotEmpty) _lastFolder = path;
+    if (!context.mounted) return null;
+    return _usableFolder(context, path);
+  } on Exception catch (error) {
+    if (!context.mounted) return null;
+    await _tell(context, 'Could not open the folder picker.\n$error');
+    return null;
+  }
 }
 
 Future<String?> _pickAndroidFolder(BuildContext context) async {
@@ -173,166 +182,47 @@ Future<bool> _confirm(
   return accepted ?? false;
 }
 
-/// Lists folders in the app. A click selects one. The arrow opens it.
-class _WindowsFolderDialog extends StatefulWidget {
-  const _WindowsFolderDialog({required this.start});
-
-  final String start;
-
-  @override
-  State<_WindowsFolderDialog> createState() => _WindowsFolderDialogState();
-}
-
-class _WindowsFolderDialogState extends State<_WindowsFolderDialog> {
-  /// Null lists the drives.
-  String? _current;
-  String? _selected;
-  late Future<List<String>> _entries;
-
-  @override
-  void initState() {
-    super.initState();
-    _show(widget.start);
-  }
-
-  void _show(String? path) {
-    _current = path;
-    _selected = null;
-    _entries = path == null ? _drives() : _folders(path);
-  }
-
-  void _go(String? path) => setState(() => _show(path));
-
-  void _up() {
-    final current = _current;
-    if (current == null) return;
-    final parent = p.dirname(current);
-    _go(parent == current ? null : parent);
-  }
-
-  Future<List<String>> _folders(String path) async {
-    final found = <String>[];
-    await for (final entity in Directory(path).list(followLinks: false)) {
-      if (entity is! Directory) continue;
-      final name = p.basename(entity.path);
-      if (name.startsWith('.')) continue;
-      found.add(entity.path);
-    }
-    found.sort(
-      (a, b) =>
-          p.basename(a).toLowerCase().compareTo(p.basename(b).toLowerCase()),
+/// Lets the user choose a file, such as a zip of film scans.
+Future<String?> pickAlbumFile(
+  BuildContext context, {
+  String? dialogTitle,
+  List<String>? extensions,
+}) async {
+  if (Platform.isWindows) {
+    FilePickerWindows.registerWith();
+  } else if (Platform.isAndroid) {
+    FilePickerAndroid.registerWith();
+  } else {
+    await _tell(
+      context,
+      'Choosing a file is available on Windows and Android.',
     );
-    return found;
+    return null;
   }
-
-  Future<List<String>> _drives() async {
-    final found = <String>[];
-    for (var code = 65; code <= 90; code++) {
-      final root = '${String.fromCharCode(code)}:\\';
-      if (await Directory(root).exists()) found.add(root);
-    }
-    return found;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final current = _current;
-    final chosen = _selected ?? current;
-    return Dialog(
-      child: SizedBox(
-        width: 520,
-        height: 480,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(8, 8, 16, 8),
-              child: Row(
-                children: [
-                  IconButton(
-                    tooltip: 'Up',
-                    onPressed: current == null ? null : _up,
-                    icon: const Icon(Icons.arrow_upward_rounded),
-                  ),
-                  Expanded(
-                    child: Text(
-                      current ?? 'This PC',
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const Divider(height: 1),
-            Expanded(
-              child: FutureBuilder<List<String>>(
-                future: _entries,
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState != ConnectionState.done) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
-                  if (snapshot.hasError) {
-                    return Padding(
-                      padding: const EdgeInsets.all(20),
-                      child: Text(
-                        'This folder cannot be read.\n${snapshot.error}',
-                      ),
-                    );
-                  }
-                  final entries = snapshot.data ?? const <String>[];
-                  if (entries.isEmpty) {
-                    return const Center(child: Text('No folders here'));
-                  }
-                  return ListView.builder(
-                    itemCount: entries.length,
-                    itemBuilder: (context, index) {
-                      final path = entries[index];
-                      final name = current == null ? path : p.basename(path);
-                      return ListTile(
-                        selected: path == _selected,
-                        leading: const Icon(Icons.folder_outlined),
-                        title: Text(
-                          name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        trailing: IconButton(
-                          tooltip: 'Open',
-                          icon: const Icon(Icons.chevron_right_rounded),
-                          onPressed: () => _go(path),
-                        ),
-                        onTap: () => setState(() => _selected = path),
-                      );
-                    },
-                  );
-                },
-              ),
-            ),
-            const Divider(height: 1),
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('Cancel'),
-                  ),
-                  const SizedBox(width: 8),
-                  FilledButton(
-                    onPressed: chosen == null
-                        ? null
-                        : () => Navigator.of(context).pop(chosen),
-                    child: const Text('Use this folder'),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
+  try {
+    final files = await FilePicker.pickFiles(
+      dialogTitle: dialogTitle ?? 'Choose a file',
+      type: extensions == null || extensions.isEmpty
+          ? FileType.any
+          : FileType.custom,
+      allowedExtensions: extensions == null || extensions.isEmpty
+          ? null
+          : extensions,
     );
+    if (!context.mounted) return null;
+    if (files.isEmpty) return null;
+    final path = files.first.path;
+    if (path == null || path.isEmpty) return null;
+    if (!await File(path).exists()) {
+      if (!context.mounted) return null;
+      await _tell(context, 'That file is not available.\n$path');
+      return null;
+    }
+    return path;
+  } on Exception catch (error) {
+    if (!context.mounted) return null;
+    await _tell(context, 'Could not open the file picker.\n$error');
+    return null;
   }
 }
 

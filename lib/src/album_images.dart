@@ -63,6 +63,108 @@ Future<void> albumEnsureThumbnail(
   await _thumbnailProvider(file, library)._ensure(priority: priority);
 }
 
+/// Width and height, in pixels, of the thumbnail the grid shows for [file].
+///
+/// The stored thumbnail is read (a small file) and only its header is parsed,
+/// so this is cheap; a missing one is made first, in the background, by the
+/// normal thumbnail pool. Because the size comes from the very bytes the tile
+/// draws, it is exactly the aspect ratio on screen, orientation included.
+/// Null when the photo cannot be shown.
+Future<(int, int)?> albumThumbnailDimensions(
+  File file, {
+  AlbumLibrary? library,
+}) async {
+  return _thumbnailProvider(file, library)._dimensions();
+}
+
+/// Width and height, in pixels, of [file] itself, parsed from the image
+/// header alone — no pixel decode — so a very large stitched composite never
+/// has to be decoded just to learn its aspect ratio. Used as a fallback when
+/// the thumbnail cannot be made. Null when the header cannot be read.
+///
+/// The size is the raw header size, orientation not applied. That is fine for
+/// the intended fallback: stitched PNGs carry no orientation.
+Future<(int, int)?> albumSourceDimensions(File file) async {
+  final path = file.path;
+  return Isolate.run(() => _sourceDimensionsIsolate(path));
+}
+
+Future<(int, int)?> _sourceDimensionsIsolate(String path) async {
+  try {
+    final bytes = await File(path).readAsBytes();
+    final decoder = img.findDecoderForData(bytes);
+    final info = decoder?.startDecode(bytes);
+    if (info == null || info.width <= 0 || info.height <= 0) return null;
+    return (info.width, info.height);
+  } catch (_) {
+    return null;
+  }
+}
+
+/// [albumThumbnailDimensions] for many files at once.
+///
+/// The stored thumbnails are read and their headers parsed on a single worker
+/// isolate, so measuring a folder of photos never blocks the UI isolate. The
+/// map holds every input path; photos whose stored thumbnail is missing or
+/// cannot be read map to null — their thumbnails can be made on demand with
+/// [albumThumbnailDimensions], through the normal pool.
+Future<Map<String, (int, int)?>> albumThumbnailDimensionsBatch(
+  List<File> files, {
+  AlbumLibrary? library,
+}) async {
+  if (files.isEmpty) return const {};
+  final cache = library?.cache;
+  final width = cache?.thumbnailWidth ?? albumThumbnailWidth;
+  final quality = cache?.thumbnailQuality ?? albumThumbnailQuality;
+  final directory = (library?.thumbnailDirectory ??
+          _defaultThumbnailDirectory())
+      .path;
+  final paths = [for (final file in files) file.path];
+  return Isolate.run(
+    () => _dimensionsBatchIsolate(paths, width, quality, directory),
+  );
+}
+
+/// Worker for [albumThumbnailDimensionsBatch]: one pass over [paths], a stat,
+/// a small read and a header parse each. Runs off the UI isolate.
+Future<Map<String, (int, int)?>> _dimensionsBatchIsolate(
+  List<String> paths,
+  int width,
+  int quality,
+  String directory,
+) async {
+  final out = <String, (int, int)?>{};
+  for (final path in paths) {
+    try {
+      final file = File(path);
+      final stat = await file.stat();
+      if (stat.type != FileSystemEntityType.file) {
+        out[path] = null;
+        continue;
+      }
+      final key = albumCacheHash(
+        '$path|${stat.size}|${stat.modified.microsecondsSinceEpoch}'
+        '|$width|$quality',
+      );
+      final bytes = await _readStored(
+        File(p.join(directory, '$key.thumb')),
+      );
+      if (bytes == null) {
+        out[path] = null;
+        continue;
+      }
+      final decoder = img.findDecoderForData(bytes);
+      final info = decoder?.startDecode(bytes);
+      out[path] = info == null || info.width <= 0 || info.height <= 0
+          ? null
+          : (info.width, info.height);
+    } catch (_) {
+      out[path] = null;
+    }
+  }
+  return out;
+}
+
 /// Builds missing thumbnails for [files] in the background, a few at a time,
 /// without starving tiles that are already on screen. Returns how many were
 /// newly made (already-cached files are skipped).
@@ -612,6 +714,23 @@ class AlbumThumbnailProvider extends ImageProvider<AlbumThumbnailProvider> {
       return true;
     } catch (_) {
       return false;
+    }
+  }
+
+  /// The pixel size of the thumbnail this provider shows: the stored one when
+  /// it exists, a freshly made one otherwise. Only the header is parsed, not
+  /// the pixels. Null when the photo cannot be shown.
+  Future<(int, int)?> _dimensions() async {
+    try {
+      final stored = await _storedFile();
+      final saved = await _readStored(stored);
+      final bytes = saved ?? await _makeOnce(stored, priority: 0);
+      final decoder = img.findDecoderForData(bytes);
+      final info = decoder?.startDecode(bytes);
+      if (info == null || info.width <= 0 || info.height <= 0) return null;
+      return (info.width, info.height);
+    } catch (_) {
+      return null;
     }
   }
 

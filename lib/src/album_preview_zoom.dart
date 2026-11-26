@@ -1,5 +1,10 @@
 import 'package:flutter/material.dart';
 
+/// How much of the viewport height the fitted photo fills. Must match
+/// `_fitVerticalFraction` in album_preview_page.dart, so the flight lands on
+/// the preview's fitted photo instead of overshooting to the full height.
+const double _fitVerticalFraction = 0.9;
+
 /// Open/close motion that grows from [fromGlobal] (the tapped tile) to fill
 /// its parent, and shrinks back into that rect on the way out.
 ///
@@ -35,7 +40,7 @@ class AlbumPreviewZoomTransition extends StatelessWidget {
 
         return LayoutBuilder(
           builder: (context, constraints) {
-            final to = Offset.zero & constraints.biggest;
+            final to = _flightTarget(constraints.biggest);
             final host = context.findRenderObject() as RenderBox?;
 
             // Never fall back to [to] while [fromGlobal] is set but the host
@@ -120,6 +125,16 @@ class AlbumPreviewZoomTransition extends StatelessWidget {
         ? Curves.easeInCubic.transform(v)
         : Curves.easeOutCubic.transform(v);
   }
+}
+
+/// The rect the flight ends at: the full width at [_fitVerticalFraction] of
+/// the height, centered vertically. `BoxFit.contain` inside it lays the image
+/// out exactly as the preview's fitted photo does, so the open motion lands on
+/// the photo rather than overshooting to the full height.
+Rect _flightTarget(Size size) {
+  final height = size.height * _fitVerticalFraction;
+  final top = (size.height - height) / 2;
+  return Rect.fromLTWH(0, top, size.width, height);
 }
 
 /// Global bounds of [context]'s render box, or null when it is not laid out.

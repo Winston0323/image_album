@@ -9,6 +9,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:windows_file_picker/windows_file_picker.dart';
 
 import 'pick_album_folder.dart';
+import 'stitcher/image_item.dart';
+import 'stitcher/stitch_editor_page.dart';
 
 /// Folder to open straight away, set with `--dart-define=ALBUM_PATH=...`.
 /// Handy while developing; it is added to the folders already in the album.
@@ -142,6 +144,38 @@ class _AlbumHomeState extends State<_AlbumHome> {
     } on FileSystemException {
       _tell(const SnackBar(content: Text('Could not save the album file.')));
     }
+  }
+
+  /// Opens the stitching editor with the groups picked in the album.
+  Future<void> _stitchGroups(List<List<AlbumPhoto>> groups) async {
+    // Turn the picked photos into ImageItems for the stitching editor.
+    final items = <List<ImageItem>>[];
+    for (final group in groups) {
+      final list = <ImageItem>[];
+      for (final photo in group) {
+        try {
+          final bytes = await photo.file.readAsBytes();
+          list.add(
+            ImageItem(
+              bytes: bytes,
+              path: photo.file.path,
+              name: photo.fileName,
+            ),
+          );
+        } catch (_) {
+          // Skip files that cannot be read.
+        }
+      }
+      if (list.isNotEmpty) items.add(list);
+    }
+
+    if (items.isEmpty || !mounted) return;
+
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => StitchEditorPage(groups: items),
+      ),
+    );
   }
 
   Future<void> _removeSource(String path) async {
@@ -292,11 +326,17 @@ class _AlbumHomeState extends State<_AlbumHome> {
         context,
         initialDirectory: initial ?? _library?.filmLibrary,
       ),
+      pickFile: ({dialogTitle, extensions}) => pickAlbumFile(
+        context,
+        dialogTitle: dialogTitle,
+        extensions: extensions,
+      ),
       filmLibraryPath: library.filmLibrary,
       onFilmLibraryChanged: (path) {
         library.setFilmLibrary(path);
         setState(() => _started = true);
       },
+      stitchGroups: _stitchGroups,
       actions: [
         if (_regenProgress case final progress?)
           Tooltip(

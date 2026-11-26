@@ -12,8 +12,24 @@
 
 namespace {
 
-bool IsAccessibilityTreeNoise(const std::string& line) {
-  return line.find("Failed to update ui::AXTree") != std::string::npos;
+// Debug-only framework chatter that is not an album failure. None of these
+// crash the app, and none appear in release builds: the Windows engine's
+// accessibility-tree churn, hit tests on render boxes mid-layout, and the
+// MouseTracker "_debugDuringDeviceUpdate" assertion that fires when a pointer
+// device update races a frame build (a known framework issue on hot reload).
+bool IsFlutterDebugNoise(const std::string& line) {
+  static const char* const kNoise[] = {
+      "Failed to update ui::AXTree",
+      "Cannot hit test a render box with no size",
+      "mouse_tracker.dart",
+      "_debugDuringDeviceUpdate",
+  };
+  for (const char* pattern : kNoise) {
+    if (line.find(pattern) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void ForwardStderr(HANDLE source, HANDLE destination) {
@@ -32,7 +48,7 @@ void ForwardStderr(HANDLE source, HANDLE destination) {
       }
       const std::string line = pending.substr(start, end - start + 1);
       start = end + 1;
-      if (IsAccessibilityTreeNoise(line)) {
+      if (IsFlutterDebugNoise(line)) {
         continue;
       }
       DWORD written = 0;
@@ -46,7 +62,7 @@ void ForwardStderr(HANDLE source, HANDLE destination) {
       pending.clear();
     }
   }
-  if (!pending.empty() && !IsAccessibilityTreeNoise(pending)) {
+  if (!pending.empty() && !IsFlutterDebugNoise(pending)) {
     DWORD written = 0;
     ::WriteFile(destination, pending.data(), static_cast<DWORD>(pending.size()),
                 &written, nullptr);

@@ -528,12 +528,54 @@ Future<void> _hideFilmMeta(File file) async {
   } catch (_) {}
 }
 
+/// Roll sizes a film is sold in, mirroring ApertureDiary's `FilmType`.
+enum AlbumFilmSize {
+  thirtyFive('135'),
+  oneTwenty('120'),
+  instax('Instax');
+
+  const AlbumFilmSize(this.label);
+  final String label;
+}
+
+/// Emulsion process, mirroring ApertureDiary's `FilmCategory`.
+enum AlbumFilmCategory {
+  colorNegative('Color negative'),
+  blackAndWhite('Black & white'),
+  colorSlide('Color slide');
+
+  const AlbumFilmCategory(this.label);
+  final String label;
+}
+
+/// Manufacturer / house brand, mirroring ApertureDiary's `FilmBrand`.
+enum AlbumFilmBrand {
+  kodak('Kodak'),
+  fujifilm('Fuji'),
+  ilford('Ilford'),
+  cinestill('CineStill'),
+  other('Other');
+
+  const AlbumFilmBrand(this.label);
+  final String label;
+}
+
 /// One film kind from ApertureDiary's list, such as Gold 200 or Ultramax.
+///
+/// Carries the same categorization ApertureDiary uses: brand, emulsion
+/// category, ISO, and the roll sizes the stock ships in. Cinema/aerial stocks
+/// carry [motionPicture] so they can be grouped under "Movie" like
+/// ApertureDiary's brand chips.
 class AlbumFilmKind {
   const AlbumFilmKind({
     required this.name,
     required this.iconKey,
     required this.folderName,
+    required this.iso,
+    required this.brand,
+    required this.category,
+    required this.formats,
+    this.motionPicture = false,
   });
 
   /// Display name, for example `Kodak Gold 200`.
@@ -544,7 +586,26 @@ class AlbumFilmKind {
   /// Folder name: brand, series, then the film, such as `KODAK_GOLD_200`.
   final String folderName;
 
+  final int iso;
+  final AlbumFilmBrand brand;
+  final AlbumFilmCategory category;
+
+  /// Roll sizes this stock is sold in.
+  final List<AlbumFilmSize> formats;
+
+  /// Cinema / aerial camera stocks (grouped under the "Movie" brand).
+  final bool motionPicture;
+
   String get iconAsset => 'assets/films/$iconKey.png';
+
+  /// Group header: cinema stocks are grouped apart from still brands, so a
+  /// Kodak Vision3 reads "Movie" rather than "Kodak".
+  String get brandGroupLabel => motionPicture ? 'Movie' : brand.label;
+
+  /// `135 · 120` for the formats this stock ships in.
+  String get formatsLabel => formats.map((f) => f.label).join(' · ');
+
+  bool offers(AlbumFilmSize size) => formats.contains(size);
 }
 
 /// Folder name for a catalog display name.
@@ -627,9 +688,14 @@ bool _looksLikeFilmName(String word) =>
 final List<AlbumFilmKind> albumFilmKinds = [
   for (final film in _catalog)
     AlbumFilmKind(
-      name: film.$1,
-      iconKey: film.$2,
-      folderName: albumFilmFolderName(film.$1),
+      name: film.name,
+      iconKey: film.iconKey,
+      folderName: albumFilmFolderName(film.name),
+      iso: film.iso,
+      brand: film.brand,
+      category: film.category,
+      formats: film.formats,
+      motionPicture: film.motionPicture,
     ),
 ];
 
@@ -743,6 +809,40 @@ Future<void> _rememberFilmFolder(
   if (libraryRoot != null) {
     await albumSetFilmLink(libraryRoot, kind.iconKey, folder);
   }
+}
+
+/// Moves the roll folder [rollPath] to sit directly under [targetFilmFolder],
+/// keeping its name (uniquified when a folder of that name already exists).
+/// Returns the new roll path, or null when [rollPath] is not a folder.
+Future<String?> albumMoveFilmRoll({
+  required String rollPath,
+  required String targetFilmFolder,
+}) async {
+  final source = Directory(rollPath);
+  if (!await source.exists()) return null;
+  final film = Directory(targetFilmFolder);
+  await film.create(recursive: true);
+
+  final from = p.normalize(p.dirname(rollPath));
+  final to = p.normalize(film.path);
+  if (_samePath(from, to)) return p.normalize(rollPath);
+  if (!_sameVolume(rollPath, film.path)) {
+    throw FileSystemException(
+      'The film is on a different drive from the roll.',
+      rollPath,
+    );
+  }
+
+  final name = p.basename(rollPath);
+  var destPath = p.join(film.path, name);
+  var n = 2;
+  while (await FileSystemEntity.type(destPath) !=
+      FileSystemEntityType.notFound) {
+    destPath = p.join(film.path, '${name}_$n');
+    n++;
+  }
+  await _renameDirectory(source, destPath);
+  return destPath;
 }
 
 /// Points [kind] at [folder] without renaming it.
@@ -893,37 +993,283 @@ String? albumFilmIconAsset(String name) =>
 String _fold(String value) =>
     value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '');
 
-/// Name and icon file, matching ApertureDiary's film boxes.
-const List<(String, String)> _catalog = [
-  ('Kodak Portra 160', 'portra-160'),
-  ('Kodak Portra 400', 'portra-400'),
-  ('Kodak Portra 800', 'portra-800'),
-  ('Kodak Gold 200', 'gold-200'),
-  ('Kodak Ultramax 400', 'ultramax-400'),
-  ('Kodak Ektar 100', 'ektar-100'),
-  ('CineStill 800T', 'cinestill-800t'),
-  ('Fujifilm Pro 400H', 'fuji-pro-400h'),
-  ('Fujifilm Superia X-TRA 400', 'fuji-superia-400'),
-  ('Fujifilm 200', 'fuji-200'),
-  ('Fujifilm 400', 'fuji-400'),
-  ('Fujifilm Instax', 'fuji-instax-800'),
-  ('Kodak Vision3 250D (5207)', 'kodak-vision3-250d'),
-  ('Kodak Vision3 500T (5219)', 'kodak-vision3-500t'),
-  ('Kodak Vision3 50D (5203)', 'kodak-vision3-50d'),
-  ('Kodak Aerocolor IV (2460)', 'kodak-aerocolor-2460'),
-  ('Kodak Tri-X 400', 'tri-x-400'),
-  ('Kodak T-Max 100', 'tmax-100'),
-  ('Kodak T-Max 400', 'tmax-400'),
-  ('Ilford HP5 Plus', 'hp5-400'),
-  ('Ilford Delta 100', 'delta-100'),
-  ('Ilford Delta 400', 'delta-400'),
-  ('Ilford FP4 Plus', 'fp4-125'),
-  ('Fujifilm Neopan Acros 100 II', 'fuji-acros-100'),
-  ('Kodak Ektachrome E100', 'ektachrome-100'),
-  ('Kodak Ektachrome 100D (5294)', 'kodak-ektachrome-100d-5294'),
-  ('Fujichrome Velvia 50', 'fuji-velvia-50'),
-  ('Fujichrome Velvia 100', 'fuji-velvia-100'),
-  ('Fujichrome Provia 100F', 'fuji-provia-100'),
+/// One catalog row: a stock with its categorization, matching ApertureDiary's
+/// `FilmCatalogEntry`.
+class _CatalogFilm {
+  const _CatalogFilm({
+    required this.name,
+    required this.iconKey,
+    required this.iso,
+    required this.brand,
+    required this.category,
+    required this.formats,
+    this.motionPicture = false,
+  });
+
+  final String name;
+  final String iconKey;
+  final int iso;
+  final AlbumFilmBrand brand;
+  final AlbumFilmCategory category;
+  final List<AlbumFilmSize> formats;
+  final bool motionPicture;
+}
+
+const _both = [AlbumFilmSize.thirtyFive, AlbumFilmSize.oneTwenty];
+const _only135 = [AlbumFilmSize.thirtyFive];
+const _onlyInstax = [AlbumFilmSize.instax];
+
+/// Name, icon file, and categorization, matching ApertureDiary's film boxes.
+const List<_CatalogFilm> _catalog = [
+  // —— Color negative ——
+  _CatalogFilm(
+    name: 'Kodak Portra 160',
+    iconKey: 'portra-160',
+    iso: 160,
+    brand: AlbumFilmBrand.kodak,
+    category: AlbumFilmCategory.colorNegative,
+    formats: _both,
+  ),
+  _CatalogFilm(
+    name: 'Kodak Portra 400',
+    iconKey: 'portra-400',
+    iso: 400,
+    brand: AlbumFilmBrand.kodak,
+    category: AlbumFilmCategory.colorNegative,
+    formats: _both,
+  ),
+  _CatalogFilm(
+    name: 'Kodak Portra 800',
+    iconKey: 'portra-800',
+    iso: 800,
+    brand: AlbumFilmBrand.kodak,
+    category: AlbumFilmCategory.colorNegative,
+    formats: _both,
+  ),
+  _CatalogFilm(
+    name: 'Kodak Gold 200',
+    iconKey: 'gold-200',
+    iso: 200,
+    brand: AlbumFilmBrand.kodak,
+    category: AlbumFilmCategory.colorNegative,
+    formats: _both,
+  ),
+  _CatalogFilm(
+    name: 'Kodak Ultramax 400',
+    iconKey: 'ultramax-400',
+    iso: 400,
+    brand: AlbumFilmBrand.kodak,
+    category: AlbumFilmCategory.colorNegative,
+    formats: _only135,
+  ),
+  _CatalogFilm(
+    name: 'Kodak Ektar 100',
+    iconKey: 'ektar-100',
+    iso: 100,
+    brand: AlbumFilmBrand.kodak,
+    category: AlbumFilmCategory.colorNegative,
+    formats: _both,
+  ),
+  _CatalogFilm(
+    name: 'CineStill 800T',
+    iconKey: 'cinestill-800t',
+    iso: 800,
+    brand: AlbumFilmBrand.cinestill,
+    category: AlbumFilmCategory.colorNegative,
+    formats: _only135,
+  ),
+  _CatalogFilm(
+    name: 'Fujifilm Pro 400H',
+    iconKey: 'fuji-pro-400h',
+    iso: 400,
+    brand: AlbumFilmBrand.fujifilm,
+    category: AlbumFilmCategory.colorNegative,
+    formats: _both,
+  ),
+  _CatalogFilm(
+    name: 'Fujifilm Superia X-TRA 400',
+    iconKey: 'fuji-superia-400',
+    iso: 400,
+    brand: AlbumFilmBrand.fujifilm,
+    category: AlbumFilmCategory.colorNegative,
+    formats: _only135,
+  ),
+  _CatalogFilm(
+    name: 'Fujifilm 200',
+    iconKey: 'fuji-200',
+    iso: 200,
+    brand: AlbumFilmBrand.fujifilm,
+    category: AlbumFilmCategory.colorNegative,
+    formats: _only135,
+  ),
+  _CatalogFilm(
+    name: 'Fujifilm 400',
+    iconKey: 'fuji-400',
+    iso: 400,
+    brand: AlbumFilmBrand.fujifilm,
+    category: AlbumFilmCategory.colorNegative,
+    formats: _only135,
+  ),
+  _CatalogFilm(
+    name: 'Fujifilm Instax',
+    iconKey: 'fuji-instax-800',
+    iso: 800,
+    brand: AlbumFilmBrand.fujifilm,
+    category: AlbumFilmCategory.colorNegative,
+    formats: _onlyInstax,
+  ),
+  _CatalogFilm(
+    name: 'Kodak Vision3 250D (5207)',
+    iconKey: 'kodak-vision3-250d',
+    iso: 250,
+    brand: AlbumFilmBrand.kodak,
+    category: AlbumFilmCategory.colorNegative,
+    formats: _both,
+    motionPicture: true,
+  ),
+  _CatalogFilm(
+    name: 'Kodak Vision3 200T (5213)',
+    iconKey: 'kodak-vision3-200t',
+    iso: 200,
+    brand: AlbumFilmBrand.kodak,
+    category: AlbumFilmCategory.colorNegative,
+    formats: _both,
+    motionPicture: true,
+  ),
+  _CatalogFilm(
+    name: 'Kodak Vision3 500T (5219)',
+    iconKey: 'kodak-vision3-500t',
+    iso: 500,
+    brand: AlbumFilmBrand.kodak,
+    category: AlbumFilmCategory.colorNegative,
+    formats: _both,
+    motionPicture: true,
+  ),
+  _CatalogFilm(
+    name: 'Kodak Vision3 50D (5203)',
+    iconKey: 'kodak-vision3-50d',
+    iso: 50,
+    brand: AlbumFilmBrand.kodak,
+    category: AlbumFilmCategory.colorNegative,
+    formats: _both,
+    motionPicture: true,
+  ),
+  _CatalogFilm(
+    name: 'Kodak Aerocolor IV (2460)',
+    iconKey: 'kodak-aerocolor-2460',
+    iso: 100,
+    brand: AlbumFilmBrand.kodak,
+    category: AlbumFilmCategory.colorNegative,
+    formats: _both,
+    motionPicture: true,
+  ),
+  // —— Black & white ——
+  _CatalogFilm(
+    name: 'Kodak Tri-X 400',
+    iconKey: 'tri-x-400',
+    iso: 400,
+    brand: AlbumFilmBrand.kodak,
+    category: AlbumFilmCategory.blackAndWhite,
+    formats: _both,
+  ),
+  _CatalogFilm(
+    name: 'Kodak T-Max 100',
+    iconKey: 'tmax-100',
+    iso: 100,
+    brand: AlbumFilmBrand.kodak,
+    category: AlbumFilmCategory.blackAndWhite,
+    formats: _both,
+  ),
+  _CatalogFilm(
+    name: 'Kodak T-Max 400',
+    iconKey: 'tmax-400',
+    iso: 400,
+    brand: AlbumFilmBrand.kodak,
+    category: AlbumFilmCategory.blackAndWhite,
+    formats: _both,
+  ),
+  _CatalogFilm(
+    name: 'Ilford HP5 Plus',
+    iconKey: 'hp5-400',
+    iso: 400,
+    brand: AlbumFilmBrand.ilford,
+    category: AlbumFilmCategory.blackAndWhite,
+    formats: _both,
+  ),
+  _CatalogFilm(
+    name: 'Ilford Delta 100',
+    iconKey: 'delta-100',
+    iso: 100,
+    brand: AlbumFilmBrand.ilford,
+    category: AlbumFilmCategory.blackAndWhite,
+    formats: _both,
+  ),
+  _CatalogFilm(
+    name: 'Ilford Delta 400',
+    iconKey: 'delta-400',
+    iso: 400,
+    brand: AlbumFilmBrand.ilford,
+    category: AlbumFilmCategory.blackAndWhite,
+    formats: _both,
+  ),
+  _CatalogFilm(
+    name: 'Ilford FP4 Plus',
+    iconKey: 'fp4-125',
+    iso: 125,
+    brand: AlbumFilmBrand.ilford,
+    category: AlbumFilmCategory.blackAndWhite,
+    formats: _both,
+  ),
+  _CatalogFilm(
+    name: 'Fujifilm Neopan Acros 100 II',
+    iconKey: 'fuji-acros-100',
+    iso: 100,
+    brand: AlbumFilmBrand.fujifilm,
+    category: AlbumFilmCategory.blackAndWhite,
+    formats: _both,
+  ),
+  // —— Color slide ——
+  _CatalogFilm(
+    name: 'Kodak Ektachrome E100',
+    iconKey: 'ektachrome-100',
+    iso: 100,
+    brand: AlbumFilmBrand.kodak,
+    category: AlbumFilmCategory.colorSlide,
+    formats: _both,
+  ),
+  _CatalogFilm(
+    name: 'Kodak Ektachrome 100D (5294)',
+    iconKey: 'kodak-ektachrome-100d-5294',
+    iso: 100,
+    brand: AlbumFilmBrand.kodak,
+    category: AlbumFilmCategory.colorSlide,
+    formats: _only135,
+    motionPicture: true,
+  ),
+  _CatalogFilm(
+    name: 'Fujichrome Velvia 50',
+    iconKey: 'fuji-velvia-50',
+    iso: 50,
+    brand: AlbumFilmBrand.fujifilm,
+    category: AlbumFilmCategory.colorSlide,
+    formats: _both,
+  ),
+  _CatalogFilm(
+    name: 'Fujichrome Velvia 100',
+    iconKey: 'fuji-velvia-100',
+    iso: 100,
+    brand: AlbumFilmBrand.fujifilm,
+    category: AlbumFilmCategory.colorSlide,
+    formats: _both,
+  ),
+  _CatalogFilm(
+    name: 'Fujichrome Provia 100F',
+    iconKey: 'fuji-provia-100',
+    iso: 100,
+    brand: AlbumFilmBrand.fujifilm,
+    category: AlbumFilmCategory.colorSlide,
+    formats: _both,
+  ),
 ];
 
 /// The film box. [asset] is a package asset; without one, the name's initials.
